@@ -228,6 +228,7 @@
       <div class="dgrid">${items.map((i) => `
         <div class="dish">
           <button type="button" class="add" data-act="quick-add" data-id="${i.id}">
+            ${i.image_ver ? `<img class="dish-img" src="/menu-img/${i.id}?v=${i.image_ver}" alt="" loading="lazy">` : ''}
             <span class="n">${esc(i.name)}</span><span class="tags">${i.tags.map(esc).join(' · ')}</span><span class="p">${money(i.price_cents)}</span>
           </button>
           <button type="button" class="opt" data-act="options" data-id="${i.id}">Options</button>
@@ -356,7 +357,7 @@
           <div class="eyebrow">Bill · ${TYPE_LABEL[o.type]}</div>
           <h1 class="title" style="font-size:44px">${esc(orderTitle(o))}</h1>
           <div class="muted">Opened ${clock(o.opened_at)} · ${mins(o.opened_at)} min · ${esc(o.staff_name || '')}${o.bill_printed_at ? ` · Bill printed ${clock(o.bill_printed_at)}` : ''}</div>
-          ${pending.length ? `<div class="warn"><span>${pending.length} item${pending.length > 1 ? 's have' : ' has'} not been sent to the kitchen.</span>
+          ${pending.length ? `<div class="warn"><span>${pending.length} item${pending.length > 1 ? 's have' : ' has'} not been sent to the kitchen. Charging sends ${pending.length > 1 ? 'them' : 'it'} automatically.</span>
             <button type="button" data-act="tab" data-tab="order">Back to order</button></div>` : '<div style="height:22px"></div>'}
           <div class="blines">${o.items.map((i) => `<div class="bline"><span>${i.qty}</span><span>${esc(i.name)}${modsHtml(i) ? `<small>${modsHtml(i)}</small>` : ''}</span><span>${money(lineTotal(i))}</span></div>`).join('') || '<div class="empty">No items yet.</div>'}</div>
           <div class="bsum" style="margin-top:14px">
@@ -449,6 +450,31 @@
     <input data-f="price" inputmode="decimal" placeholder="0.00" value="${a.price_cents != null ? major(a.price_cents) : ''}">
     <button type="button" data-act="admin-addon-del" title="Remove">✕</button></div>`;
 
+  function imgPreview(rec) {
+    const A = S.admin;
+    const src = A.img ? A.img.url : !A.imgRemove && rec?.image_ver ? `/menu-img/${rec.id}?v=${rec.image_ver}` : '';
+    return src ? `<img src="${src}" alt="">` : '<span>No photo</span>';
+  }
+  function resetImg() { if (S.admin.img) URL.revokeObjectURL(S.admin.img.url); S.admin.img = null; S.admin.imgRemove = false; }
+  // Shrink to max 800px and re-encode as JPEG in the browser so uploads stay small.
+  async function resizeImage(file) {
+    if (!file.type.startsWith('image/')) throw new Error('Choose an image file');
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => { throw new Error('Could not read that image'); });
+    const k = Math.min(1, 800 / Math.max(bmp.width, bmp.height));
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(bmp, 0, 0, cv.width, cv.height);
+    const blob = await new Promise((ok) => cv.toBlob(ok, 'image/jpeg', 0.82));
+    if (!blob) throw new Error('Could not process that image');
+    return blob;
+  }
+  async function uploadImage(id, blob) {
+    const res = await fetch(`/api/admin/items/${id}/image`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg' }, body: blob, credentials: 'same-origin' });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Photo upload failed');
+  }
+
   function adminForm() {
     const A = S.admin; const D = A.data; const s = A.sel;
     if (!s) return `<div class="empty" style="padding:28px 20px">Select a row to edit it, or add a new one.</div>`;
@@ -463,6 +489,11 @@
              ${field('Sort order', inp('sort', rec.sort, 'inputmode="numeric"'))}</div>`
         + field('Tags', inp('tags', rec.tags.filter((t) => t !== 'Spice level').join(', '), 'placeholder="Wok, Veg"'), 'Comma separated. Shown under the dish name.')
         + `<div class="field">${check('has_spice', rec.has_spice, 'Ask for spice level')}${check('active', rec.active, 'Show on menu')}</div>`
+        + `<div class="field"><label>Photo</label>
+             <div class="img-edit"><div class="img-box" id="img-box">${imgPreview(rec)}</div>
+               <div class="img-actions"><label class="btn" style="cursor:pointer">Choose photo<input type="file" id="img-file" accept="image/*" hidden></label>
+                 <button type="button" class="link-red" data-act="admin-img-remove">Remove photo</button>
+                 <small class="muted">Resized to 800 px before upload.</small></div></div></div>`
         + `<div class="field"><label>Add-ons</label><div id="addons">${rec.addons.map(addonRow).join('')}</div>
              <button type="button" class="link-red" data-act="admin-addon-add">+ Add add-on</button></div>`;
     } else if (s.kind === 'category') {
@@ -520,7 +551,8 @@
          <select id="admin-cat" class="admin-select"><option value="all">All categories</option>${D.categories.map((c) => `<option value="${c.id}" ${String(c.id) === A.cat ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)
         + `<div class="htable-wrap"><table class="htable"><thead><tr><th>Dish</th><th>Category</th><th>Station</th><th>Add-ons</th><th>Status</th><th style="text-align:right">Price</th></tr></thead><tbody>
           ${list.map((i) => `<tr class="${selRow('item', i.id)}" data-act="admin-sel" data-kind="item" data-id="${i.id}">
-            <td class="name"><b>${esc(i.name)}</b><div class="muted" style="font-size:12.5px">${i.tags.map(esc).join(' · ')}</div></td><td>${esc(catName(i.category_id))}</td><td>${esc(stName(i.station_id))}</td>
+            <td class="name"><div class="dish-cell">${i.image_ver ? `<img src="/menu-img/${i.id}?v=${i.image_ver}" alt="" loading="lazy">` : '<span class="noimg"></span>'}
+              <div><b>${esc(i.name)}</b><div class="muted" style="font-size:12.5px">${i.tags.map(esc).join(' · ')}</div></div></div></td><td>${esc(catName(i.category_id))}</td><td>${esc(stName(i.station_id))}</td>
             <td>${i.addons.length || '—'}</td><td><span class="s ${i.active ? 'paid' : 'void'}">${i.active ? 'On menu' : 'Hidden'}</span></td><td style="text-align:right"><b>${money(i.price_cents)}</b></td></tr>`).join('')
             || '<tr><td colspan="6" class="muted">No dishes match.</td></tr>'}</tbody></table></div>`;
     }
@@ -583,7 +615,13 @@
     const s = S.admin.sel;
     const body = readAdminForm();
     const path = `/admin/${ADMIN_PATH[s.kind]}${s.id ? '/' + s.id : ''}`;
-    await api(path, { method: s.id ? 'PATCH' : 'POST', body });
+    const out = await api(path, { method: s.id ? 'PATCH' : 'POST', body });
+    if (s.kind === 'item') {
+      const id = s.id || out.id;
+      if (S.admin.img) await uploadImage(id, S.admin.img.blob);
+      else if (S.admin.imgRemove && s.id) await api(`/admin/items/${id}/image`, { method: 'DELETE' });
+      resetImg();
+    }
     toast(`${s.id ? 'Saved' : 'Added'} ${body.name || body.code || ADMIN_NOUN[s.kind]}`);
     await afterAdminChange(s.id ? s : null);
   }
@@ -805,20 +843,25 @@
         S.order = null; S.modal = null; S.tab = 'floor'; await loadFloor(); render();
       };
       S.modal = { kind: 'confirm', title: `Charge ${money(o.total_cents)} by ${S.payMethod}?`,
-        text: pending ? `${pending} unsent item${pending > 1 ? 's' : ''} will be removed before charging.` : `This closes ${orderTitle(o)}${o.type === 'dinein' ? ' and frees the table' : ''}.`,
+        text: pending ? `${pending} item${pending > 1 ? 's have' : ' has'} not been sent yet. ${pending > 1 ? 'They' : 'It'} will be sent to the kitchen now and included in this bill.` : `This closes ${orderTitle(o)}${o.type === 'dinein' ? ' and frees the table' : ''}.`,
         yes: 'Charge', run: doIt };
       renderModal();
     },
     'hist-filter': (d) => { S.histFilter = d.v; render(); },
     'hist-sel': async (d) => { S.histSel = +d.id; S.histOrder = await api('/orders/' + d.id); render(); },
-    'admin-section': (d) => { S.admin.section = d.id; S.admin.sel = null; render(); },
-    'admin-sel': (d) => { S.admin.sel = { kind: d.kind, id: +d.id }; render(); },
+    'admin-section': (d) => { resetImg(); S.admin.section = d.id; S.admin.sel = null; render(); },
+    'admin-sel': (d) => { resetImg(); S.admin.sel = { kind: d.kind, id: +d.id }; render(); },
+    'admin-img-remove': () => {
+      resetImg(); S.admin.imgRemove = true;
+      $('#img-box').innerHTML = imgPreview(null); $('#img-file').value = '';
+    },
     'admin-new': (d) => {
+      resetImg();
       S.admin.sel = { kind: d.kind, id: null }; render();
       if (d.area) { const a = $('#admin-form [name="area_id"]'); if (a) a.value = d.area; }
       $('#admin-form input')?.focus();
     },
-    'admin-cancel': () => { S.admin.sel = null; render(); },
+    'admin-cancel': () => { resetImg(); S.admin.sel = null; render(); },
     'admin-addon-add': () => { $('#addons').insertAdjacentHTML('beforeend', addonRow()); $('#addons .addon-row:last-child input').focus(); },
     'admin-addon-del': (d, el) => el.closest('.addon-row').remove(),
     'admin-delete': () => {
@@ -844,6 +887,14 @@
     if (e.target.id === 'admin-form') { e.preventDefault(); run(adminSave)(); }
   });
   document.addEventListener('change', (e) => {
+    if (e.target.id === 'img-file' && e.target.files[0]) {
+      run(async () => {
+        const blob = await resizeImage(e.target.files[0]);
+        resetImg();
+        S.admin.img = { blob, url: URL.createObjectURL(blob) };
+        $('#img-box').innerHTML = imgPreview(null);
+      })();
+    }
     if (e.target.id === 'admin-cat') { S.admin.cat = e.target.value; $('#admin-list').innerHTML = adminList(); }
   });
   document.addEventListener('input', (e) => {

@@ -93,6 +93,14 @@ async function loadOrder(id, client = pool) {
 // ---------- auth ----------
 app.get('/api/config', (req, res) => res.json(CONFIG));
 
+// Dish photos are public (no session needed) and cached; the ?v= version changes on every upload.
+app.get('/menu-img/:id', wrap(async (req, res) => {
+  const { rows: [img] } = await pool.query('SELECT mime, data FROM menu_item_images WHERE item_id=$1', [int(req.params.id)]);
+  if (!img) return res.status(404).end();
+  res.set({ 'Content-Type': img.mime, 'Cache-Control': req.query.v ? 'public, max-age=31536000, immutable' : 'no-cache', 'X-Content-Type-Options': 'nosniff' });
+  res.send(img.data);
+}));
+
 app.post('/api/login', wrap(async (req, res) => {
   const pin = String(req.body.pin || '');
   if (!/^\d{4,8}$/.test(pin)) bad('Enter your PIN');
@@ -287,8 +295,18 @@ app.post('/api/orders/:id/kots', wrap(async (req, res) => {
   const created = await tx(async (c) => {
     const { rows: [o] } = await c.query("SELECT * FROM orders WHERE id=$1 AND status='open' FOR UPDATE", [id]);
     if (!o) bad('Order is closed');
+    const out = await createKots(c, id, mode, holdLater, req.user.id);
+    if (!out.length) bad('Nothing new to send');
+    return out;
+  });
+  notify('kitchen');
+  res.json({ kots: created, order: await loadOrder(id) });
+}));
+
+// Groups unsent lines into KOTs (per station or one combined ticket). Returns the created KOTs.
+async function createKots(c, id, mode, holdLater, staffId) {
     const { rows: pending } = await c.query('SELECT * FROM order_items WHERE order_id=$1 AND kot_id IS NULL ORDER BY id', [id]);
-    if (!pending.length) bad('Nothing new to send');
+    if (!pending.length) return [];
     const { rows: [prev] } = await c.query('SELECT count(*)::int AS n FROM kots WHERE order_id=$1', [id]);
     const isAddon = prev.n > 0;
     const groups = new Map();
@@ -302,17 +320,14 @@ app.post('/api/orders/:id/kots', wrap(async (req, res) => {
     for (const g of groups.values()) {
       const { rows: [k] } = await c.query(
         'INSERT INTO kots(order_id, station_id, status, is_addon, staff_id) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-        [id, g.station, g.held ? 'held' : 'new', isAddon, req.user.id]);
+        [id, g.station, g.held ? 'held' : 'new', isAddon, staffId]);
       await c.query('UPDATE order_items SET kot_id=$1 WHERE id = ANY($2)', [k.id, g.items.map((i) => i.id)]);
       out.push(k);
     }
     // printing a bill then adding items re-opens the bill
     await c.query('UPDATE orders SET bill_printed_at=NULL WHERE id=$1', [id]);
     return out;
-  });
-  notify('kitchen');
-  res.json({ kots: created, order: await loadOrder(id) });
-}));
+}
 
 app.post('/api/orders/:id/print-bill', wrap(async (req, res) => {
   const id = int(req.params.id);
@@ -329,17 +344,20 @@ app.post('/api/orders/:id/pay', wrap(async (req, res) => {
   const id = int(req.params.id);
   const method = req.body.payment_method;
   if (!['card', 'cash', 'wallet'].includes(method)) bad('Pick a payment method');
+  let kitchenTouched = false;
   await tx(async (c) => {
     const { rows: [o] } = await c.query("SELECT * FROM orders WHERE id=$1 AND status='open' FOR UPDATE", [id]);
     if (!o) bad('Order is closed');
     const { rows: [n] } = await c.query('SELECT count(*)::int AS n FROM order_items WHERE order_id=$1', [id]);
     if (!n.n) bad('Order has no items');
-    await c.query('DELETE FROM order_items WHERE order_id=$1 AND kot_id IS NULL', [id]); // drop unsent lines
-    await saveTotals(c, id);
+    // Unsent lines are part of the sale: send them to the kitchen rather than dropping them.
+    const sent = await createKots(c, id, 'station', false, req.user.id);
+    if (sent.length) kitchenTouched = true;
+    const t = await saveTotals(c, id);
+    if (t.total_cents <= 0) bad('Order total is zero');
     await c.query("UPDATE orders SET status='paid', payment_method=$2, closed_at=now() WHERE id=$1", [id, method]);
-    // anything still in the kitchen stays on the KDS; ready tickets for counter/takeaway are cleared by kitchen
   });
-  notify('floor');
+  notify(kitchenTouched ? 'kitchen' : 'floor');
   res.json(await loadOrder(id));
 }));
 

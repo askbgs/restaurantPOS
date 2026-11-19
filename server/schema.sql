@@ -137,3 +137,12 @@ CREATE INDEX IF NOT EXISTS orders_opened_idx ON orders(opened_at);
 
 -- v2: admin page
 ALTER TABLE dining_tables ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+
+-- v3: dish photos (stored in Postgres so they survive Railway redeploys)
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS image_ver INT;
+CREATE TABLE IF NOT EXISTS menu_item_images (
+  item_id     INT PRIMARY KEY REFERENCES menu_items(id) ON DELETE CASCADE,
+  mime        TEXT NOT NULL,
+  data        BYTEA NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

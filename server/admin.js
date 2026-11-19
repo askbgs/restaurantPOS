@@ -90,13 +90,37 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
 
   r.post('/items', friendly(async (req, res) => {
     const m = itemBody(req.body);
-    await tx(async (c) => {
+    const id = await tx(async (c) => {
       const { rows: [row] } = await c.query(
         `INSERT INTO menu_items(category_id, station_id, name, price_cents, tags, has_spice, active, sort)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
         [m.category_id, m.station_id, m.name, m.price_cents, tagsFor(m), m.has_spice, m.active, m.sort]);
       await saveAddons(c, row.id, m.addons);
+      return row.id;
     });
+    notify('menu');
+    res.json({ ok: true, id });
+  }));
+
+  // ---------- dish photos ----------
+  const IMG_TYPES = { 'image/jpeg': [0xff, 0xd8], 'image/png': [0x89, 0x50], 'image/webp': [0x52, 0x49] };
+  r.put('/items/:id/image', express.raw({ type: Object.keys(IMG_TYPES), limit: '3mb' }), wrap(async (req, res) => {
+    const id = int(req.params.id);
+    const mime = req.headers['content-type'];
+    const sig = IMG_TYPES[mime];
+    if (!Buffer.isBuffer(req.body) || !req.body.length || !sig || req.body[0] !== sig[0] || req.body[1] !== sig[1]) bad('Upload a JPEG, PNG or WebP image');
+    await tx(async (c) => {
+      const u = await c.query('UPDATE menu_items SET image_ver = coalesce(image_ver, 0) + 1 WHERE id=$1', [id]);
+      if (!u.rowCount) throw new HttpError(404, 'Dish not found');
+      await c.query(`INSERT INTO menu_item_images(item_id, mime, data) VALUES ($1,$2,$3)
+                     ON CONFLICT (item_id) DO UPDATE SET mime=EXCLUDED.mime, data=EXCLUDED.data, updated_at=now()`, [id, mime, req.body]);
+    });
+    done(res);
+  }));
+  r.delete('/items/:id/image', wrap(async (req, res) => {
+    const id = int(req.params.id);
+    await pool.query('DELETE FROM menu_item_images WHERE item_id=$1', [id]);
+    await pool.query('UPDATE menu_items SET image_ver=NULL WHERE id=$1', [id]);
     done(res);
   }));
   r.patch('/items/:id', friendly(async (req, res) => {
