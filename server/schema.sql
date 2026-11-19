@@ -146,3 +146,101 @@ CREATE TABLE IF NOT EXISTS menu_item_images (
   data        BYTEA NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- v4: editable settings (Admin → Settings). Values override environment defaults.
+CREATE TABLE IF NOT EXISTS settings (
+  key    TEXT PRIMARY KEY,
+  value  TEXT NOT NULL
+);
+
+-- v5: voids, refunds, audit log, shifts & cash drawer, thermal printing
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS void_qty INT NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS shifts (
+  id              SERIAL PRIMARY KEY,
+  opened_by       INT REFERENCES staff(id),
+  opened_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  float_cents     INT NOT NULL DEFAULT 0,
+  closed_by       INT REFERENCES staff(id),
+  closed_at       TIMESTAMPTZ,
+  counted_cents   INT,
+  expected_cents  INT,
+  note            TEXT,
+  status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS shifts_one_open ON shifts((status)) WHERE status = 'open';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shift_id INT REFERENCES shifts(id);
+
+CREATE TABLE IF NOT EXISTS cash_movements (
+  id            SERIAL PRIMARY KEY,
+  shift_id      INT NOT NULL REFERENCES shifts(id),
+  kind          TEXT NOT NULL CHECK (kind IN ('in','out')),
+  amount_cents  INT NOT NULL CHECK (amount_cents > 0),
+  reason        TEXT NOT NULL,
+  staff_id      INT REFERENCES staff(id),
+  approved_by   INT REFERENCES staff(id),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS item_voids (
+  id             SERIAL PRIMARY KEY,
+  order_id       INT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  order_item_id  INT REFERENCES order_items(id) ON DELETE SET NULL,
+  name           TEXT NOT NULL,
+  qty            INT NOT NULL,
+  amount_cents   INT NOT NULL,
+  reason         TEXT NOT NULL,
+  staff_id       INT REFERENCES staff(id),
+  approved_by    INT REFERENCES staff(id),
+  shift_id       INT REFERENCES shifts(id),
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS refunds (
+  id            SERIAL PRIMARY KEY,
+  order_id      INT NOT NULL REFERENCES orders(id),
+  amount_cents  INT NOT NULL CHECK (amount_cents > 0),
+  method        TEXT NOT NULL CHECK (method IN ('card','cash','wallet')),
+  reason        TEXT NOT NULL,
+  staff_id      INT REFERENCES staff(id),
+  approved_by   INT REFERENCES staff(id),
+  shift_id      INT REFERENCES shifts(id),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id           SERIAL PRIMARY KEY,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  action       TEXT NOT NULL,
+  staff_id     INT REFERENCES staff(id),
+  approved_by  INT REFERENCES staff(id),
+  order_id     INT REFERENCES orders(id) ON DELETE SET NULL,
+  summary      TEXT NOT NULL,
+  details      JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_log(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS printers (
+  id           SERIAL PRIMARY KEY,
+  name         TEXT NOT NULL,
+  conn         TEXT NOT NULL CHECK (conn IN ('network','share')),
+  address      TEXT NOT NULL,             -- "192.168.1.50:9100", "\\\\PC\\XP80" or "/dev/usb/lp0"
+  width_chars  INT NOT NULL DEFAULT 48,   -- 48 = 80 mm, 32 = 58 mm
+  active       BOOLEAN NOT NULL DEFAULT TRUE
+);
+ALTER TABLE stations ADD COLUMN IF NOT EXISTS printer_id INT REFERENCES printers(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS print_jobs (
+  id          SERIAL PRIMARY KEY,
+  printer_id  INT NOT NULL REFERENCES printers(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,
+  title       TEXT NOT NULL,
+  doc         JSONB NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','done','failed')),
+  attempts    INT NOT NULL DEFAULT 0,
+  error       TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  claimed_at  TIMESTAMPTZ,
+  printed_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS print_jobs_pending_idx ON print_jobs(status, created_at);

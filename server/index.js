@@ -3,6 +3,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { pool, tx, migrate, hashPin, checkPin, startListener, notify, listeners } = require('./db');
 const adminRouter = require('./admin');
+const createPrinting = require('./printing');
+const reportsRouter = require('./reports');
 
 const CONFIG = {
   restaurant: process.env.RESTAURANT_NAME || 'Ember & Bao',
@@ -14,6 +16,19 @@ const CONFIG = {
   lateMinutes: Number(process.env.LATE_MINUTES ?? 12),
   timezone: process.env.TZ_DISPLAY || 'Asia/Colombo',
 };
+const ENV_CONFIG = { ...CONFIG };
+const NUMERIC = ['taxRate', 'serviceRate', 'lateMinutes'];
+
+// Settings saved in Admin override the environment defaults.
+async function loadSettings() {
+  const { rows } = await pool.query('SELECT key, value FROM settings');
+  Object.assign(CONFIG, ENV_CONFIG);
+  for (const { key, value } of rows) {
+    if (!(key in ENV_CONFIG) || key === 'timezone') continue;
+    CONFIG[key] = NUMERIC.includes(key) ? Number(value) : value;
+  }
+}
+listeners.add((kind) => { if (kind === 'settings') loadSettings().catch((e) => console.error('settings reload', e.message)); });
 
 const app = express();
 app.set('trust proxy', 1);
@@ -30,7 +45,7 @@ function parseCookies(header = '') {
 }
 
 function computeTotals(order, items) {
-  const subtotal = items.reduce((s, i) => s + i.qty * (i.unit_price_cents + i.addons_cents), 0);
+  const subtotal = items.reduce((s, i) => s + (i.qty - (i.void_qty || 0)) * (i.unit_price_cents + i.addons_cents), 0);
   const discount = Math.round(subtotal * (order.discount_pct || 0) / 100);
   const base = subtotal - discount;
   const service = order.service_on ? Math.round(base * CONFIG.serviceRate) : 0;
@@ -42,7 +57,7 @@ function computeTotals(order, items) {
 
 async function saveTotals(client, orderId) {
   const { rows: [o] } = await client.query('SELECT * FROM orders WHERE id=$1', [orderId]);
-  const { rows: items } = await client.query('SELECT qty, unit_price_cents, addons_cents FROM order_items WHERE order_id=$1', [orderId]);
+  const { rows: items } = await client.query('SELECT qty, void_qty, unit_price_cents, addons_cents FROM order_items WHERE order_id=$1', [orderId]);
   const t = computeTotals(o, items);
   await client.query(
     `UPDATE orders SET subtotal_cents=$2, discount_cents=$3, service_cents=$4, tax_cents=$5, tip_cents=$6, total_cents=$7 WHERE id=$1`,
@@ -64,7 +79,8 @@ function orderStatus(o) {
 const ORDER_SUMMARY_SQL = `
   SELECT o.*, t.code AS table_code, s.name AS staff_name,
     (SELECT count(*)::int FROM order_items i WHERE i.order_id=o.id) AS item_count,
-    (SELECT coalesce(sum(qty),0)::int FROM order_items i WHERE i.order_id=o.id) AS item_qty,
+    (SELECT coalesce(sum(qty - void_qty),0)::int FROM order_items i WHERE i.order_id=o.id) AS item_qty,
+    (SELECT coalesce(sum(amount_cents),0)::int FROM refunds r WHERE r.order_id=o.id) AS refunded_cents,
     (SELECT count(*)::int FROM order_items i WHERE i.order_id=o.id AND i.kot_id IS NULL) AS pending_items,
     (SELECT count(*)::int FROM kots k WHERE k.order_id=o.id) AS kot_count,
     (SELECT count(*)::int FROM kots k WHERE k.order_id=o.id AND k.status IN ('held','new','cooking')) AS kot_live,
@@ -83,12 +99,45 @@ async function loadOrder(id, client = pool) {
   const { rows: kots } = await client.query(
     `SELECT k.*, st.name AS station_name FROM kots k LEFT JOIN stations st ON st.id=k.station_id
      WHERE k.order_id=$1 ORDER BY k.id`, [id]);
+  const { rows: refunds } = await client.query(
+    `SELECT r.*, s.name AS staff_name, a.name AS approved_name FROM refunds r LEFT JOIN staff s ON s.id=r.staff_id
+     LEFT JOIN staff a ON a.id=r.approved_by WHERE r.order_id=$1 ORDER BY r.id`, [id]);
+  const { rows: voids } = await client.query(
+    `SELECT v.*, s.name AS staff_name, a.name AS approved_name FROM item_voids v LEFT JOIN staff s ON s.id=v.staff_id
+     LEFT JOIN staff a ON a.id=v.approved_by WHERE v.order_id=$1 ORDER BY v.id`, [id]);
   o.display_status = orderStatus(o);
   o.items = items;
   o.kots = kots;
+  o.refunds = refunds;
+  o.voids = voids;
   Object.assign(o, computeTotals(o, items));
   return o;
 }
+
+// ---------- audit log + manager approval ----------
+async function audit(c, { action, staffId = null, approvedBy = null, orderId = null, summary, details = {} }) {
+  await c.query('INSERT INTO audit_log(action, staff_id, approved_by, order_id, summary, details) VALUES ($1,$2,$3,$4,$5,$6)',
+    [action, staffId, approvedBy && approvedBy !== staffId ? approvedBy : null, orderId, String(summary).slice(0, 300), JSON.stringify(details)]);
+}
+// Returns the approving staff id: the user themself if their role is allowed, otherwise whoever owns approval_pin.
+async function approval(req, roles = ['Manager']) {
+  if (roles.includes(req.user.role)) return req.user.id;
+  const pin = String(req.body.approval_pin || '');
+  if (!pin) throw new HttpError(403, `${roles.join(' or ')} approval needed`);
+  const { rows } = await pool.query('SELECT id, pin_hash FROM staff WHERE active AND role = ANY($1)', [roles]);
+  const ok = rows.find((s) => checkPin(pin, s.pin_hash));
+  if (!ok) throw new HttpError(403, 'Approval PIN not accepted');
+  return ok.id;
+}
+const reason = (v) => { const r = String(v || '').trim().slice(0, 200); if (r.length < 3) bad('Give a reason'); return r; };
+const otitle = (o) => (o.type === 'dinein' ? `Table ${o.table_code}` : `${({ takeaway: 'Takeaway', delivery: 'Delivery', counter: 'Counter' })[o.type]} #${o.order_no}`);
+async function openShift(c) {
+  const { rows: [sh] } = await c.query("SELECT * FROM shifts WHERE status='open'");
+  return sh || null;
+}
+
+const printing = createPrinting({ pool, tx, listeners, CONFIG, wrap, HttpError });
+app.use('/bridge', printing.bridge);
 
 // ---------- auth ----------
 app.get('/api/config', (req, res) => res.json(CONFIG));
@@ -106,7 +155,11 @@ app.post('/api/login', wrap(async (req, res) => {
   if (!/^\d{4,8}$/.test(pin)) bad('Enter your PIN');
   const { rows } = await pool.query('SELECT * FROM staff WHERE active');
   const user = rows.find((s) => checkPin(pin, s.pin_hash));
-  if (!user) throw new HttpError(401, 'Wrong PIN');
+  if (!user) {
+    await audit(pool, { action: 'login.failed', summary: 'Wrong PIN entered', details: { ip: req.ip } });
+    throw new HttpError(401, 'Wrong PIN');
+  }
+  await audit(pool, { action: 'login', staffId: user.id, summary: `${user.name} signed in` });
   const token = crypto.randomBytes(24).toString('hex');
   await pool.query('INSERT INTO sessions(token, staff_id) VALUES ($1,$2)', [token, user.id]);
   res.setHeader('Set-Cookie', `pos_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 16}${req.secure ? '; Secure' : ''}`);
@@ -128,7 +181,9 @@ async function auth(req, res, next) {
 app.use('/api', auth);
 
 app.get('/api/me', (req, res) => res.json(req.user));
-app.use('/api/admin', adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError }));
+app.use('/api/admin', adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError, CONFIG, ENV_CONFIG, loadSettings, audit }));
+app.use('/api/admin/printing', printing.admin);
+app.use('/api/reports', reportsRouter({ pool, wrap, HttpError, CONFIG }));
 app.post('/api/logout', wrap(async (req, res) => {
   await pool.query('DELETE FROM sessions WHERE token=$1', [req.token]);
   res.setHeader('Set-Cookie', 'pos_session=; Path=/; Max-Age=0');
@@ -154,7 +209,7 @@ app.get('/api/menu', wrap(async (req, res) => {
                  FROM item_addons a WHERE a.item_id=m.id), '[]') AS addons
      FROM menu_items m JOIN stations st ON st.id=m.station_id WHERE m.active ORDER BY m.sort, m.id`);
   const { rows: stations } = await pool.query('SELECT * FROM stations ORDER BY sort, id');
-  res.json({ categories: categories.map((c) => ({ ...c, items: items.filter((i) => i.category_id === c.id) })), stations });
+  res.json({ categories: categories.map((c) => ({ ...c, items: items.filter((i) => i.category_id === c.id) })).filter((c) => c.items.length), stations });
 }));
 
 // ---------- floor + queue ----------
@@ -226,9 +281,14 @@ app.patch('/api/orders/:id', wrap(async (req, res) => {
   }
   if (!sets.length) bad('Nothing to update');
   await tx(async (c) => {
+    const { rows: [before] } = await c.query(`${ORDER_SUMMARY_SQL} WHERE o.id=$1`, [id]);
     const r = await c.query(`UPDATE orders SET ${sets.join(', ')} WHERE id=$1 AND status='open'`, vals);
     if (!r.rowCount) bad('Order is closed');
     await saveTotals(c, id);
+    if ('discount_pct' in req.body && before.discount_pct !== int(req.body.discount_pct)) {
+      await audit(c, { action: 'order.discount', staffId: req.user.id, orderId: id,
+        summary: `${otitle(before)} discount ${before.discount_pct}% → ${int(req.body.discount_pct)}%` });
+    }
   });
   notify('order');
   res.json(await loadOrder(id));
@@ -295,7 +355,7 @@ app.post('/api/orders/:id/kots', wrap(async (req, res) => {
   const created = await tx(async (c) => {
     const { rows: [o] } = await c.query("SELECT * FROM orders WHERE id=$1 AND status='open' FOR UPDATE", [id]);
     if (!o) bad('Order is closed');
-    const out = await createKots(c, id, mode, holdLater, req.user.id);
+    const out = await createKots(c, id, mode, holdLater, req.user.id, req.user.name);
     if (!out.length) bad('Nothing new to send');
     return out;
   });
@@ -303,8 +363,20 @@ app.post('/api/orders/:id/kots', wrap(async (req, res) => {
   res.json({ kots: created, order: await loadOrder(id) });
 }));
 
+// Send a KOT to its station printer (or the default kitchen printer). No printer configured → nothing queued.
+async function printKot(c, kotId, staffName, flag) {
+  const { rows: [k] } = await c.query(
+    'SELECT k.*, st.name AS station_name, st.printer_id FROM kots k LEFT JOIN stations st ON st.id=k.station_id WHERE k.id=$1', [kotId]);
+  const printerId = k.printer_id || await printing.printerFor(c, 'kitchen');
+  if (!printerId) return null;
+  const { rows: [order] } = await c.query(`${ORDER_SUMMARY_SQL} WHERE o.id=$1`, [k.order_id]);
+  const { rows: items } = await c.query('SELECT * FROM order_items WHERE kot_id=$1 AND qty > void_qty ORDER BY id', [kotId]);
+  if (!items.length) return null;
+  return printing.enqueue(c, printerId, 'kot', `KOT #${k.kot_no} · ${otitle(order)}`, printing.kotDoc({ kot: k, order, items, staffName, flag }));
+}
+
 // Groups unsent lines into KOTs (per station or one combined ticket). Returns the created KOTs.
-async function createKots(c, id, mode, holdLater, staffId) {
+async function createKots(c, id, mode, holdLater, staffId, staffName) {
     const { rows: pending } = await c.query('SELECT * FROM order_items WHERE order_id=$1 AND kot_id IS NULL ORDER BY id', [id]);
     if (!pending.length) return [];
     const { rows: [prev] } = await c.query('SELECT count(*)::int AS n FROM kots WHERE order_id=$1', [id]);
@@ -323,6 +395,7 @@ async function createKots(c, id, mode, holdLater, staffId) {
         [id, g.station, g.held ? 'held' : 'new', isAddon, staffId]);
       await c.query('UPDATE order_items SET kot_id=$1 WHERE id = ANY($2)', [k.id, g.items.map((i) => i.id)]);
       out.push(k);
+      if (!g.held) await printKot(c, k.id, staffName);
     }
     // printing a bill then adding items re-opens the bill
     await c.query('UPDATE orders SET bill_printed_at=NULL WHERE id=$1', [id]);
@@ -331,13 +404,41 @@ async function createKots(c, id, mode, holdLater, staffId) {
 
 app.post('/api/orders/:id/print-bill', wrap(async (req, res) => {
   const id = int(req.params.id);
-  await tx(async (c) => {
+  const printed = await tx(async (c) => {
     const r = await c.query("UPDATE orders SET bill_printed_at=now() WHERE id=$1 AND status='open'", [id]);
     if (!r.rowCount) bad('Order is closed');
     await saveTotals(c, id);
+    const o = await loadOrder(id, c);
+    await audit(c, { action: 'bill.print', staffId: req.user.id, orderId: id, summary: `Bill printed for ${otitle(o)} · ${o.total_cents / 100}` });
+    const pid = await printing.printerFor(c, 'bill');
+    return pid ? !!(await printing.enqueue(c, pid, 'bill', `Bill · ${otitle(o)}`, printing.billDoc(o))) : false;
   });
   notify('floor');
-  res.json(await loadOrder(id));
+  res.json({ ...(await loadOrder(id)), printed_to_printer: printed });
+}));
+
+// Reprint a receipt (any order) — goes to the bill printer, or the browser prints it.
+app.post('/api/orders/:id/reprint', wrap(async (req, res) => {
+  const id = int(req.params.id);
+  const printed = await tx(async (c) => {
+    const o = await loadOrder(id, c);
+    await audit(c, { action: 'bill.reprint', staffId: req.user.id, orderId: id, summary: `Receipt reprinted for ${otitle(o)}` });
+    const pid = await printing.printerFor(c, 'bill');
+    return pid ? !!(await printing.enqueue(c, pid, 'bill', `Receipt copy · ${otitle(o)}`,
+      printing.billDoc(o, { label: o.status === 'paid' ? 'RECEIPT COPY' : 'BILL COPY', refunds: o.refunds }))) : false;
+  });
+  res.json({ ...(await loadOrder(id)), printed_to_printer: printed });
+}));
+
+app.post('/api/kots/:id/reprint', wrap(async (req, res) => {
+  const id = int(req.params.id);
+  const job = await tx(async (c) => {
+    const j = await printKot(c, id, req.user.name, 'REPRINT');
+    if (!j) bad('No kitchen printer is set up for this station');
+    await audit(c, { action: 'kot.reprint', staffId: req.user.id, summary: `KOT reprinted (ticket ${id})` });
+    return j;
+  });
+  res.json({ ok: true, job });
 }));
 
 app.post('/api/orders/:id/pay', wrap(async (req, res) => {
@@ -348,14 +449,16 @@ app.post('/api/orders/:id/pay', wrap(async (req, res) => {
   await tx(async (c) => {
     const { rows: [o] } = await c.query("SELECT * FROM orders WHERE id=$1 AND status='open' FOR UPDATE", [id]);
     if (!o) bad('Order is closed');
+    const shift = await openShift(c);
+    if (!shift) throw new HttpError(409, 'No shift is open. Open a shift before taking payments.');
     const { rows: [n] } = await c.query('SELECT count(*)::int AS n FROM order_items WHERE order_id=$1', [id]);
     if (!n.n) bad('Order has no items');
     // Unsent lines are part of the sale: send them to the kitchen rather than dropping them.
-    const sent = await createKots(c, id, 'station', false, req.user.id);
+    const sent = await createKots(c, id, 'station', false, req.user.id, req.user.name);
     if (sent.length) kitchenTouched = true;
     const t = await saveTotals(c, id);
     if (t.total_cents <= 0) bad('Order total is zero');
-    await c.query("UPDATE orders SET status='paid', payment_method=$2, closed_at=now() WHERE id=$1", [id, method]);
+    await c.query("UPDATE orders SET status='paid', payment_method=$2, closed_at=now(), shift_id=$3 WHERE id=$1", [id, method, shift.id]);
   });
   notify(kitchenTouched ? 'kitchen' : 'floor');
   res.json(await loadOrder(id));
@@ -363,13 +466,106 @@ app.post('/api/orders/:id/pay', wrap(async (req, res) => {
 
 app.post('/api/orders/:id/void', wrap(async (req, res) => {
   const id = int(req.params.id);
+  const { rows: [pre] } = await pool.query('SELECT count(*)::int AS n FROM kots WHERE order_id=$1', [id]);
+  const sentToKitchen = pre.n > 0;
+  const why = sentToKitchen ? reason(req.body.reason) : String(req.body.reason || 'Cancelled before sending').slice(0, 200);
+  const approvedBy = sentToKitchen ? await approval(req) : req.user.id;
   await tx(async (c) => {
-    const r = await c.query("UPDATE orders SET status='void', closed_at=now() WHERE id=$1 AND status='open'", [id]);
+    const o = await loadOrder(id, c);
+    if (o.status !== 'open') bad('Order is closed');
+    const shift = await openShift(c);
+    const r = await c.query("UPDATE orders SET status='void', closed_at=now(), shift_id=$2 WHERE id=$1 AND status='open'", [id, shift ? shift.id : null]);
     if (!r.rowCount) bad('Order is closed');
+    // record every sent line as voided, and tell the kitchen
+    for (const i of o.items.filter((x) => x.kot_id && x.qty > x.void_qty)) {
+      const q = i.qty - i.void_qty;
+      await c.query(`INSERT INTO item_voids(order_id, order_item_id, name, qty, amount_cents, reason, staff_id, approved_by, shift_id)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [id, i.id, i.name, q, q * (i.unit_price_cents + i.addons_cents), why, req.user.id, approvedBy, shift ? shift.id : null]);
+    }
+    const live = o.kots.filter((k) => k.status !== 'served');
+    for (const k of live) {
+      const { rows: [st] } = await c.query('SELECT printer_id FROM stations WHERE id=$1', [k.station_id]);
+      const pid = (st && st.printer_id) || await printing.printerFor(c, 'kitchen');
+      const names = o.items.filter((i) => i.kot_id === k.id && i.qty > i.void_qty);
+      for (const i of names) {
+        await printing.enqueue(c, pid, 'void', `VOID · ${otitle(o)}`, printing.voidDoc({ order: o, kotNo: k.kot_no, stationName: k.station_name, name: i.name, qty: i.qty - i.void_qty, reason: why, staffName: req.user.name }));
+      }
+    }
     await c.query("UPDATE kots SET status='served', served_at=now() WHERE order_id=$1 AND status<>'served'", [id]);
+    await audit(c, { action: 'order.void', staffId: req.user.id, approvedBy, orderId: id,
+      summary: `${otitle(o)} voided (${sentToKitchen ? 'after sending to kitchen' : 'before sending'}) · ${why}`, details: { total_cents: o.total_cents } });
+  });
+  notify('kitchen');
+  res.json({ ok: true });
+}));
+
+// Void some or all of a line that has already gone to the kitchen.
+app.post('/api/items/:id/void', wrap(async (req, res) => {
+  const itemId = int(req.params.id);
+  const why = reason(req.body.reason);
+  const approvedBy = await approval(req);
+  const orderId = await tx(async (c) => {
+    const { rows: [i] } = await c.query(
+      `SELECT i.*, o.status AS order_status, k.kot_no, k.status AS kot_status, st.name AS station_name, st.printer_id
+       FROM order_items i JOIN orders o ON o.id=i.order_id LEFT JOIN kots k ON k.id=i.kot_id
+       LEFT JOIN stations st ON st.id=i.station_id WHERE i.id=$1 FOR UPDATE OF i`, [itemId]);
+    if (!i) throw new HttpError(404, 'Item not found');
+    if (i.order_status !== 'open') bad('Order is closed. Use a refund instead.');
+    if (!i.kot_id) bad('This item has not been sent. Remove it with the − button.');
+    const left = i.qty - i.void_qty;
+    const q = Math.min(left, Math.max(1, int(req.body.qty) || left));
+    if (left <= 0) bad('Already voided');
+    const shift = await openShift(c);
+    await c.query('UPDATE order_items SET void_qty = void_qty + $2 WHERE id=$1', [itemId, q]);
+    await c.query(`INSERT INTO item_voids(order_id, order_item_id, name, qty, amount_cents, reason, staff_id, approved_by, shift_id)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [i.order_id, itemId, i.name, q, q * (i.unit_price_cents + i.addons_cents), why, req.user.id, approvedBy, shift ? shift.id : null]);
+    // a ticket whose every line is voided leaves the kitchen screen
+    const { rows: [rest] } = await c.query('SELECT count(*)::int AS n FROM order_items WHERE kot_id=$1 AND qty > void_qty', [i.kot_id]);
+    if (!rest.n) await c.query("UPDATE kots SET status='served', served_at=now() WHERE id=$1 AND status<>'served'", [i.kot_id]);
+    await saveTotals(c, i.order_id);
+    const o = await loadOrder(i.order_id, c);
+    if (i.kot_status !== 'served') {
+      const pid = i.printer_id || await printing.printerFor(c, 'kitchen');
+      await printing.enqueue(c, pid, 'void', `VOID · ${otitle(o)}`,
+        printing.voidDoc({ order: o, kotNo: i.kot_no, stationName: i.station_name, name: i.name, qty: q, reason: why, staffName: req.user.name }));
+    }
+    await audit(c, { action: 'item.void', staffId: req.user.id, approvedBy, orderId: i.order_id,
+      summary: `Voided ${q} × ${i.name} on ${otitle(o)} · ${why}`, details: { amount_cents: q * (i.unit_price_cents + i.addons_cents) } });
+    return i.order_id;
+  });
+  notify('kitchen');
+  res.json(await loadOrder(orderId));
+}));
+
+// Refund all or part of a paid bill.
+app.post('/api/orders/:id/refund', wrap(async (req, res) => {
+  const id = int(req.params.id);
+  const why = reason(req.body.reason);
+  const approvedBy = await approval(req);
+  await tx(async (c) => {
+    const o = await loadOrder(id, c);
+    if (o.status !== 'paid') bad('Only paid bills can be refunded');
+    const left = o.total_cents - o.refunded_cents;
+    if (left <= 0) bad('This bill is already fully refunded');
+    const amount = req.body.full ? left : Math.round(Number(req.body.amount) * 100);
+    if (!Number.isFinite(amount) || amount <= 0) bad('Enter the refund amount');
+    if (amount > left) bad(`You can refund at most ${(left / 100).toFixed(2)}`);
+    const method = ['card', 'cash', 'wallet'].includes(req.body.method) ? req.body.method : o.payment_method;
+    const shift = await openShift(c);
+    if (method === 'cash' && !shift) throw new HttpError(409, 'Open a shift to give a cash refund from the drawer.');
+    await c.query('INSERT INTO refunds(order_id, amount_cents, method, reason, staff_id, approved_by, shift_id) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+      [id, amount, method, why, req.user.id, approvedBy, shift ? shift.id : null]);
+    const { rows: [ap] } = await c.query('SELECT name FROM staff WHERE id=$1', [approvedBy]);
+    await audit(c, { action: 'order.refund', staffId: req.user.id, approvedBy, orderId: id,
+      summary: `Refunded ${(amount / 100).toFixed(2)} (${method}) on ${otitle(o)} · ${why}`, details: { amount_cents: amount, method } });
+    const pid = await printing.printerFor(c, 'bill');
+    await printing.enqueue(c, pid, 'refund', `Refund · ${otitle(o)}`,
+      printing.refundDoc({ order: o, amount, method, reason: why, staffName: req.user.name, approverName: ap && ap.name }));
   });
   notify('floor');
-  res.json({ ok: true });
+  res.json(await loadOrder(id));
 }));
 
 // ---------- kitchen display ----------
@@ -383,7 +579,7 @@ app.get('/api/kitchen', wrap(async (req, res) => {
      WHERE k.status <> 'served' ORDER BY k.fired_at, k.id`);
   const ids = kots.map((k) => k.id);
   const { rows: items } = ids.length
-    ? await pool.query('SELECT id, kot_id, name, qty, spice, note, addons, done, course FROM order_items WHERE kot_id = ANY($1) ORDER BY id', [ids])
+    ? await pool.query('SELECT id, kot_id, name, qty, void_qty, spice, note, addons, done, course FROM order_items WHERE kot_id = ANY($1) ORDER BY id', [ids])
     : { rows: [] };
   for (const k of kots) {
     k.items = items.filter((i) => i.kot_id === k.id);
@@ -401,7 +597,10 @@ app.post('/api/kots/:id/advance', wrap(async (req, res) => {
   const next = NEXT[k.status];
   if (!next) bad('Ticket already cleared');
   const stamp = { new: 'fired_at', cooking: 'started_at', ready: 'ready_at', served: 'served_at' }[next];
-  await pool.query(`UPDATE kots SET status=$2, ${stamp}=now() WHERE id=$1 AND status=$3`, [id, next, k.status]);
+  await tx(async (c) => {
+    const u = await c.query(`UPDATE kots SET status=$2, ${stamp}=now() WHERE id=$1 AND status=$3`, [id, next, k.status]);
+    if (u.rowCount && k.status === 'held') await printKot(c, id, req.user.name, 'FIRE NOW');
+  });
   if (next === 'served') await pool.query('UPDATE order_items SET done=TRUE WHERE kot_id=$1', [id]);
   notify('kitchen');
   res.json({ ok: true, status: next });
@@ -411,6 +610,121 @@ app.post('/api/items/:id/toggle-done', wrap(async (req, res) => {
   await pool.query('UPDATE order_items SET done = NOT done WHERE id=$1 AND kot_id IS NOT NULL', [int(req.params.id)]);
   notify('kitchen');
   res.json({ ok: true });
+}));
+
+// ---------- shifts & cash drawer ----------
+const DRAWER_ROLES = ['Manager', 'Cashier'];
+const toCents = (v, label) => { const n = Math.round(Number(v) * 100); if (!Number.isFinite(n) || n < 0) bad(`Enter a valid ${label}`); return n; };
+
+async function shiftSummary(c, shiftId) {
+  const { rows: [shift] } = await c.query(
+    `SELECT sh.*, a.name AS opened_by_name, b.name AS closed_by_name FROM shifts sh
+     LEFT JOIN staff a ON a.id=sh.opened_by LEFT JOIN staff b ON b.id=sh.closed_by WHERE sh.id=$1`, [shiftId]);
+  if (!shift) throw new HttpError(404, 'Shift not found');
+  const q = async (sql) => (await c.query(sql, [shiftId])).rows;
+  const [[sales], pays, refs, cash, [voids], [voidOrders], open, movements, refundList] = await Promise.all([
+    q(`SELECT count(*)::int AS orders, coalesce(sum(total_cents),0)::int AS gross_cents, coalesce(sum(discount_cents),0)::int AS discount_cents,
+              coalesce(sum(service_cents),0)::int AS service_cents, coalesce(sum(tax_cents),0)::int AS tax_cents, coalesce(sum(tip_cents),0)::int AS tip_cents,
+              coalesce(sum(guests) FILTER (WHERE type='dinein'),0)::int AS covers
+       FROM orders WHERE shift_id=$1 AND status='paid'`),
+    q(`SELECT payment_method AS m, coalesce(sum(total_cents),0)::int AS v FROM orders WHERE shift_id=$1 AND status='paid' GROUP BY 1`),
+    q(`SELECT method AS m, coalesce(sum(amount_cents),0)::int AS v FROM refunds WHERE shift_id=$1 GROUP BY 1`),
+    q(`SELECT kind, coalesce(sum(amount_cents),0)::int AS v FROM cash_movements WHERE shift_id=$1 GROUP BY 1`),
+    q(`SELECT count(*)::int AS count, coalesce(sum(amount_cents),0)::int AS amount_cents FROM item_voids WHERE shift_id=$1`),
+    q(`SELECT count(*)::int AS n FROM orders WHERE shift_id=$1 AND status='void'`),
+    shift.status === 'open' ? c.query("SELECT count(*)::int AS n FROM orders WHERE status='open'").then((r) => r.rows) : Promise.resolve([{ n: 0 }]),
+    q(`SELECT m.*, s.name AS staff_name FROM cash_movements m LEFT JOIN staff s ON s.id=m.staff_id WHERE m.shift_id=$1 ORDER BY m.id`),
+    q(`SELECT r.*, o.order_no, s.name AS staff_name FROM refunds r JOIN orders o ON o.id=r.order_id LEFT JOIN staff s ON s.id=r.staff_id WHERE r.shift_id=$1 ORDER BY r.id`),
+  ]);
+  const by = (rows) => ({ cash: 0, card: 0, wallet: 0, ...Object.fromEntries(rows.map((r) => [r.m, r.v])) });
+  const payments = by(pays);
+  const refunds = by(refs);
+  refunds.total_cents = refunds.cash + refunds.card + refunds.wallet;
+  const cashIn = (cash.find((x) => x.kind === 'in') || { v: 0 }).v;
+  const cashOut = (cash.find((x) => x.kind === 'out') || { v: 0 }).v;
+  const expected = shift.float_cents + payments.cash - refunds.cash + cashIn - cashOut;
+  return {
+    shift, sales, payments, refunds, expected_cents: expected,
+    cash: { in_cents: cashIn, out_cents: cashOut, movements },
+    voids: { ...voids, orders: voidOrders.n }, refund_list: refundList, open_orders: open[0].n,
+  };
+}
+
+app.get('/api/shift', wrap(async (req, res) => {
+  const sh = await openShift(pool);
+  res.json(sh ? await shiftSummary(pool, sh.id) : { shift: null });
+}));
+
+app.post('/api/shift/open', wrap(async (req, res) => {
+  const float = toCents(req.body.float || 0, 'opening float');
+  const id = await tx(async (c) => {
+    if (await openShift(c)) bad('A shift is already open');
+    const { rows: [sh] } = await c.query('INSERT INTO shifts(opened_by, float_cents) VALUES ($1,$2) RETURNING id', [req.user.id, float]);
+    await audit(c, { action: 'shift.open', staffId: req.user.id, summary: `Shift #${sh.id} opened with float ${(float / 100).toFixed(2)}` });
+    return sh.id;
+  });
+  notify('shift');
+  res.json(await shiftSummary(pool, id));
+}));
+
+app.post('/api/shift/cash', wrap(async (req, res) => {
+  const kind = req.body.kind === 'in' ? 'in' : 'out';
+  const amount = toCents(req.body.amount, 'amount');
+  if (!amount) bad('Enter an amount');
+  const why = reason(req.body.reason);
+  const approvedBy = await approval(req, DRAWER_ROLES);
+  const id = await tx(async (c) => {
+    const sh = await openShift(c);
+    if (!sh) bad('No shift is open');
+    await c.query('INSERT INTO cash_movements(shift_id, kind, amount_cents, reason, staff_id, approved_by) VALUES ($1,$2,$3,$4,$5,$6)',
+      [sh.id, kind, amount, why, req.user.id, approvedBy]);
+    await audit(c, { action: `cash.${kind}`, staffId: req.user.id, approvedBy, summary: `Cash ${kind} ${(amount / 100).toFixed(2)} · ${why}` });
+    return sh.id;
+  });
+  notify('shift');
+  res.json(await shiftSummary(pool, id));
+}));
+
+app.post('/api/shift/close', wrap(async (req, res) => {
+  const counted = toCents(req.body.counted, 'counted cash amount');
+  const note = String(req.body.note || '').trim().slice(0, 300) || null;
+  const approvedBy = await approval(req, DRAWER_ROLES);
+  const { id, printed } = await tx(async (c) => {
+    const sh = await openShift(c);
+    if (!sh) bad('No shift is open');
+    const before = await shiftSummary(c, sh.id);
+    await c.query(`UPDATE shifts SET status='closed', closed_at=now(), closed_by=$2, counted_cents=$3, expected_cents=$4, note=$5 WHERE id=$1`,
+      [sh.id, approvedBy, counted, before.expected_cents, note]);
+    const v = counted - before.expected_cents;
+    await audit(c, { action: 'shift.close', staffId: req.user.id, approvedBy,
+      summary: `Shift #${sh.id} closed · expected ${(before.expected_cents / 100).toFixed(2)}, counted ${(counted / 100).toFixed(2)} (${v === 0 ? 'balanced' : v > 0 ? 'over ' + (v / 100).toFixed(2) : 'short ' + (-v / 100).toFixed(2)})` });
+    const after = await shiftSummary(c, sh.id);
+    const pid = await printing.printerFor(c, 'bill');
+    const job = await printing.enqueue(c, pid, 'zreport', `Z report · shift #${sh.id}`, printing.zReportDoc(after));
+    return { id: sh.id, printed: !!job };
+  });
+  notify('shift');
+  res.json({ ...(await shiftSummary(pool, id)), printed_to_printer: printed });
+}));
+
+app.get('/api/shifts', wrap(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT sh.*, a.name AS opened_by_name, b.name AS closed_by_name,
+       (SELECT coalesce(sum(total_cents),0)::int FROM orders o WHERE o.shift_id=sh.id AND o.status='paid') AS gross_cents,
+       (SELECT count(*)::int FROM orders o WHERE o.shift_id=sh.id AND o.status='paid') AS orders
+     FROM shifts sh LEFT JOIN staff a ON a.id=sh.opened_by LEFT JOIN staff b ON b.id=sh.closed_by
+     ORDER BY sh.id DESC LIMIT 30`);
+  res.json({ shifts: rows });
+}));
+app.get('/api/shifts/:id', wrap(async (req, res) => res.json(await shiftSummary(pool, int(req.params.id)))));
+app.post('/api/shifts/:id/print', wrap(async (req, res) => {
+  const id = int(req.params.id);
+  const printed = await tx(async (c) => {
+    const sum = await shiftSummary(c, id);
+    const pid = await printing.printerFor(c, 'bill');
+    return !!(await printing.enqueue(c, pid, 'zreport', `${sum.shift.status === 'closed' ? 'Z' : 'X'} report · shift #${id}`, printing.zReportDoc(sum)));
+  });
+  res.json({ printed_to_printer: printed });
 }));
 
 // ---------- history ----------
@@ -442,6 +756,7 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 (async () => {
   await migrate();
+  await loadSettings();
   await startListener();
   app.listen(PORT, () => console.log(`POS listening on :${PORT}`));
 })().catch((e) => { console.error(e); process.exit(1); });

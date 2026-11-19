@@ -15,6 +15,8 @@ A restaurant point-of-sale and kitchen order ticket (KOT) system built from the 
 | **Admin** (Managers only) | **Menu items**: add or edit dishes with price, category, station, tags, spice option, add-ons and a **photo**; hide a dish from the menu. Photos are resized to 800 px in the browser and stored in Postgres, so they survive redeploys. **Categories** set the default course. **Floor & tables**: add areas and tables, set seats, hide tables. **Stations** set the KOT routing and printer label. **Staff**: names, roles, PINs, and turning sign-in off. |
 | **History** | Today's orders with type filter, paid count and amount collected. A detail panel shows the items and kitchen tickets. |
 
+**Admin → Settings** controls the restaurant name, terminal name, currency, tax and service charge, and the late-ticket time for every terminal. **Load Asian menu** replaces the menu with Short Eats, Sri Lankan, Indian, Chinese, Thai, Japanese, Korean, Desserts and Drinks. Dishes that appear on past orders are kept but hidden, so history stays correct.
+
 Other features:
 - Staff sign in with a PIN. Sessions are stored in Postgres in an HttpOnly cookie.
 - Live updates across every terminal: Postgres `LISTEN/NOTIFY` feeds Server-Sent Events, so it still works if Railway runs more than one instance.
@@ -31,6 +33,53 @@ Admin safeguards:
 - Changing someone's PIN or turning off their sign-in signs them out on every terminal.
 - Menu changes reach every terminal straight away.
 
+## Shifts, voids, reports and printing
+
+### Shift & cash drawer (Shift tab)
+- Open a shift with the opening float. **Payments need an open shift**, so every sale is counted in a drawer.
+- **Cash in / Cash out** (paid-outs) need a reason and Manager or Cashier approval.
+- The Shift tab shows live figures: sales, payments by method, refunds, voids and the cash that should be in the drawer.
+- **Close shift**: count the drawer, either by entering the total or with the Rs 5000 → Rs 1 note and coin counter. The app shows over, short or balanced, saves the result and prints the **Z report**. **Print X report** prints the figures so far without closing.
+- Expected cash = float + cash sales − cash refunds + cash in − cash out.
+
+### Voids, refunds and manager approval
+- **Before a dish is sent**, staff can remove it freely with −.
+- **After it's sent**, **Void** on the line needs a reason and a Manager PIN. A Manager doesn't need to enter a PIN. The kitchen gets a VOID slip, and the bill total updates.
+- **Void order** (after anything is sent) needs a reason and a Manager PIN.
+- **Refund** a paid bill (full or part, cash/card/wallet) from History. It needs a reason and a Manager PIN and prints a refund slip with a signature line. Cash refunds come out of the open shift's drawer.
+- **Audit log** (Admin → Audit log) records voids, refunds, discount changes, bill prints and reprints, shift open/close, cash in/out, sign-ins (including wrong PINs) and every admin change, with who did it and who approved it. It is read-only.
+
+### Reports (Managers)
+- Today, Yesterday, Last 7 days, Last 30 days, This month, or a custom range.
+- Headline figures: net sales, orders, average bill and per cover, discounts, service charge and tax, voids and refunds.
+- Charts and tables: sales by day, busy hours, by category, top 10 and slowest dishes, order types, payments, staff (sales, average bill, voids), table turnover (average minutes per table) and the full void and refund lists.
+- **Export CSV** opens in Excel with every section. **Print / PDF** prints the report page, or you can save it as a PDF.
+
+### Thermal printing (Admin → Printers)
+1. Add each printer:
+   - **Network**: `192.168.1.50:9100` (most LAN Xprinter/Epson models).
+   - **Windows shared USB**: share the printer in Windows, then use `\\localhost\XP80`.
+   - **Linux USB**: `/dev/usb/lp0`.
+   - Choose 80 mm or 58 mm paper.
+2. Choose the **bill printer** (bills, receipts, refund slips, Z reports), the **default kitchen printer**, and optionally a printer per station.
+3. On a PC on the shop network (Node.js 18+), download `print-bridge.js` from that page and run the command shown there:
+   ```
+   node print-bridge.js --server https://your-app.up.railway.app --token <token>
+   ```
+   The bridge holds an open connection and prints within about a second. Jobs are queued in Postgres, so nothing is lost if the PC is off; they print when the bridge reconnects. Failed jobs retry automatically and can be retried from the jobs list.
+
+What prints:
+- New KOTs (held tickets print when fired, marked FIRE NOW).
+- VOID slips.
+- Bills, receipt and bill reprints.
+- Refund slips.
+- X and Z reports.
+- Test pages.
+
+If no printer is configured, the browser print dialog is used as before.
+
+To start the bridge automatically when Windows starts, put the command in a `.bat` file in the Startup folder, or use `pm2` / NSSM.
+
 ## Deploy on Railway
 
 1. Push this folder to a GitHub repo.
@@ -41,7 +90,7 @@ Admin safeguards:
    - (optional) `RESTAURANT_NAME`, `TERMINAL_NAME`, `CURRENCY_SYMBOL`, `TAX_LABEL`, `TAX_RATE`, `SERVICE_RATE`, `LATE_MINUTES`, `TZ_DISPLAY` (see `.env.example`).
 5. Under **Settings → Networking**, click **Generate Domain**.
 
-On first boot the app creates the tables and seeds the demo floor, stations, menu and staff.
+On first boot the app creates the tables and seeds the demo floor, the kitchen stations (Wok, Curry, Tandoor, Grill, Steam, Cold, Bar), the Asian menu and the staff.
 `railway.json` sets the start command and the `/healthz` health check.
 
 ## Run locally
@@ -57,7 +106,7 @@ export $(grep -v '^#' .env | xargs) && npm start
 
 | Variable | Default | Notes |
 |---|---|---|
-| `CURRENCY_SYMBOL` | `Rs ` | Use `$` to match the mock-up |
+| `CURRENCY_SYMBOL` | `Rs ` | Default only. Admin → Settings overrides these values |
 | `TAX_LABEL` / `TAX_RATE` | `VAT` / `0.18` | Fraction. Check against the current rate |
 | `SERVICE_RATE` | `0.10` | Service charge fraction |
 | `LATE_MINUTES` | `12` | Cooking time before a ticket shows LATE |
@@ -69,7 +118,10 @@ How totals are calculated: subtotal − discount = base. Service, tax and tip ar
 
 ```
 server/index.js    Express API, auth, SSE, static hosting
-server/admin.js    manager-only admin API
+server/admin.js    manager-only admin API + audit log
+server/printing.js print queue, receipt layouts, bridge API
+server/reports.js  sales reports
+bridge/print-bridge.js  runs on a shop PC, sends ESC/POS to printers
 server/db.js       pg pool, migrations, LISTEN/NOTIFY, PIN hashing
 server/schema.sql  tables (staff, areas, dining_tables, stations, categories,
                    menu_items, item_addons, orders, order_items, kots)
@@ -79,6 +131,5 @@ public/            web app (index.html, app.js, styles.css) — no build step
 
 ## Not included yet
 
-- Physical printing. KOTs show their target printer, and bills print through the browser.
-  A thermal-printer bridge (ESC/POS) can subscribe to the same events.
+- Sinhala and Tamil text on thermal printers. The printer code page is ASCII, so those characters print as '?'.
 - Reports beyond today's history.

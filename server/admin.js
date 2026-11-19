@@ -1,7 +1,8 @@
 // Manager-only admin API: menu, categories, floor (areas + tables), stations, staff.
 const express = require('express');
 
-module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError }) {
+module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError, CONFIG, ENV_CONFIG, loadSettings, audit }) {
+  const { loadMenu } = require('./menu-data');
   const r = express.Router();
   const bad = (msg) => { throw new HttpError(400, msg); };
   const int = (v, def = null) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : def; };
@@ -21,6 +22,48 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
 
   r.use((req, res, next) => (req.user.role === 'Manager' ? next() : next(new HttpError(403, 'Managers only'))));
 
+  // Every successful admin change is written to the audit log (PINs and photo bytes are never logged).
+  const NOUN = { categories: 'category', items: 'dish', areas: 'area', tables: 'table', stations: 'station', staff: 'staff member',
+    settings: 'settings', 'sample-menu': 'sample menu', printing: 'printing' };
+  r.use((req, res, next) => {
+    if (req.method === 'GET') return next();
+    const parts = req.path.split('/').filter(Boolean); // captured before sub-routers rewrite the path
+    const b = req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body) ? req.body : {};
+    res.on('finish', () => {
+      if (res.statusCode >= 400) return;
+      const verb = { POST: 'added', PATCH: 'changed', PUT: 'uploaded', DELETE: 'deleted' }[req.method] || req.method;
+      const label = b.name || b.code || '';
+      let summary;
+      if (parts[0] === 'sample-menu') summary = 'Loaded the Asian sample menu';
+      else if (parts[0] === 'settings') summary = `Settings changed (terminal "${b.terminal}", tax ${b.taxRate}%, service ${b.serviceRate}%)`;
+      else if (parts[0] === 'printing') {
+        const sub = parts[1];
+        summary = sub === 'routing' ? 'Printer routing changed'
+          : sub === 'token' ? 'Print bridge token regenerated'
+          : sub === 'jobs' ? `Print job #${parts[2]} retried`
+          : parts[3] === 'test' ? `Test print sent to printer #${parts[2]}`
+          : `Printer ${label || '#' + (parts[2] || '')} ${verb}`;
+      } else if (parts[1] && parts[2] === 'image') summary = `Photo ${req.method === 'DELETE' ? 'removed from' : 'uploaded for'} dish #${parts[1]}`;
+      else {
+        const what = NOUN[parts[0]] || parts[0] || 'record';
+        summary = `${what[0].toUpperCase()}${what.slice(1)} ${label || (parts[1] ? '#' + parts[1] : '')} ${verb}`.replace(/\s+/g, ' ');
+      }
+      if (parts[0] === 'staff' && b.pin) summary += ' (PIN changed)';
+      const details = Object.fromEntries(Object.entries(b).filter(([k]) => !/pin|token/i.test(k)).slice(0, 20));
+      audit(pool, { action: `admin.${parts[0] || 'change'}`, staffId: req.user.id, summary, details }).catch(() => {});
+    });
+    next();
+  });
+
+  r.get('/audit', wrap(async (req, res) => {
+    const action = String(req.query.action || '');
+    const { rows } = await pool.query(
+      `SELECT a.*, s.name AS staff_name, ap.name AS approved_name, o.order_no
+       FROM audit_log a LEFT JOIN staff s ON s.id=a.staff_id LEFT JOIN staff ap ON ap.id=a.approved_by LEFT JOIN orders o ON o.id=a.order_id
+       WHERE ($1 = '' OR a.action LIKE $1 || '%') ORDER BY a.id DESC LIMIT 300`, [action]);
+    res.json({ entries: rows });
+  }));
+
   r.get('/data', wrap(async (req, res) => {
     const [categories, items, areas, tables, stations, staff] = await Promise.all([
       pool.query(`SELECT c.*, (SELECT count(*)::int FROM menu_items m WHERE m.category_id=c.id) AS item_count
@@ -35,10 +78,49 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
       pool.query('SELECT id, name, initials, role, active FROM staff ORDER BY active DESC, name'),
     ]);
     res.json({ categories: categories.rows, items: items.rows, areas: areas.rows, tables: tables.rows,
-      stations: stations.rows, staff: staff.rows, roles: ROLES, courses: COURSES });
+      stations: stations.rows, staff: staff.rows, roles: ROLES, courses: COURSES,
+      settings: { restaurant: CONFIG.restaurant, terminal: CONFIG.terminal, currency: CONFIG.currency, taxLabel: CONFIG.taxLabel,
+        taxRate: CONFIG.taxRate, serviceRate: CONFIG.serviceRate, lateMinutes: CONFIG.lateMinutes } });
   }));
 
   const done = (res, kind = 'menu') => { notify(kind); res.json({ ok: true }); };
+
+  // ---------- settings ----------
+  r.patch('/settings', wrap(async (req, res) => {
+    const b = req.body;
+    const pctIn = (v, label) => { const n = Number(v); if (!Number.isFinite(n) || n < 0 || n > 100) bad(`${label} must be 0–100%`); return String(n / 100); };
+    const vals = {
+      restaurant: need(str(b.restaurant, 40), 'Restaurant name'),
+      terminal: need(str(b.terminal, 40), 'Terminal name'),
+      currency: ((cur) => (/[A-Za-z.]$/.test(cur) ? cur + ' ' : cur))(str(b.currency, 6) || 'Rs'),
+      taxLabel: need(str(b.taxLabel, 20), 'Tax label'),
+      taxRate: pctIn(b.taxRate, 'Tax rate'),
+      serviceRate: pctIn(b.serviceRate, 'Service charge'),
+      lateMinutes: String(Math.min(120, Math.max(1, int(b.lateMinutes, 12)))),
+    };
+    await tx(async (c) => {
+      for (const [k, v] of Object.entries(vals)) {
+        await c.query('INSERT INTO settings(key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [k, v]);
+      }
+    });
+    await loadSettings();
+    done(res, 'settings');
+  }));
+
+  // Replace the current menu with the Asian sample menu.
+  r.post('/sample-menu', wrap(async (req, res) => {
+    const out = await tx(async (c) => {
+      const result = await loadMenu(c, { replace: true });
+      if (CONFIG.terminal === ENV_CONFIG.terminal) {
+        await c.query("INSERT INTO settings(key, value) VALUES ('terminal', 'Asian Cuisine') ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value");
+      }
+      return result;
+    });
+    await loadSettings();
+    notify('settings');
+    notify('menu');
+    res.json({ ok: true, ...out });
+  }));
 
   // ---------- categories ----------
   const catBody = (b) => ({
