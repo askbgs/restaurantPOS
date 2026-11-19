@@ -248,3 +248,11 @@ CREATE INDEX IF NOT EXISTS print_jobs_pending_idx ON print_jobs(status, created_
 -- v6: items that are served without a kitchen ticket (ready-made, already cooked)
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS no_kot BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS served_direct BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- v7: login screen background photo (uploaded in Admin → Settings)
+CREATE TABLE IF NOT EXISTS app_images (
+  key         TEXT PRIMARY KEY,
+  mime        TEXT NOT NULL,
+  data        BYTEA NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

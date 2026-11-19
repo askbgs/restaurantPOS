@@ -15,6 +15,8 @@ A restaurant point-of-sale and kitchen order ticket (KOT) system built from the 
 | **Admin** (Managers only) | **Menu items**: add or edit dishes with price, category, station, tags, spice option, add-ons and a **photo**; hide a dish from the menu. Photos are resized to 800 px in the browser and stored in Postgres, so they survive redeploys. **Categories** set the default course. **Floor & tables**: add areas and tables, set seats, hide tables. **Stations** set the KOT routing and printer label. **Staff**: names, roles, PINs, and turning sign-in off. |
 | **History** | Today's orders with type filter, paid count and amount collected. A detail panel shows the items and kitchen tickets. |
 
+**Admin → Settings** also sets the **login screen background**: upload a photo of your restaurant, or keep the built-in one. It's resized to 1920 px, softly faded behind the PIN pad, and fades in when the screen opens.
+
 **Admin → Settings** controls the restaurant name, terminal name, currency, tax and service charge, and the late-ticket time for every terminal. **Load Asian menu** replaces the menu with Short Eats, Sri Lankan, Indian, Chinese, Thai, Japanese, Korean, Desserts and Drinks. Dishes that appear on past orders are kept but hidden, so history stays correct.
 
 Other features:

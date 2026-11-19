@@ -35,6 +35,7 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
       const label = b.name || b.code || '';
       let summary;
       if (parts[0] === 'sample-menu') summary = 'Loaded the Asian sample menu';
+      else if (parts[0] === 'login-bg') summary = req.method === 'DELETE' ? 'Login background reset to default' : 'Login background photo uploaded';
       else if (parts[0] === 'settings') summary = `Settings changed (terminal "${b.terminal}", tax ${b.taxRate}%, service ${b.serviceRate}%)`;
       else if (parts[0] === 'printing') {
         const sub = parts[1];
@@ -104,6 +105,20 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
       }
     });
     await loadSettings();
+    done(res, 'settings');
+  }));
+
+  // Login screen background photo
+  r.put('/login-bg', express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '4mb' }), wrap(async (req, res) => {
+    const mime = req.headers['content-type'];
+    const sig = { 'image/jpeg': [0xff, 0xd8], 'image/png': [0x89, 0x50], 'image/webp': [0x52, 0x49] }[mime];
+    if (!Buffer.isBuffer(req.body) || !req.body.length || !sig || req.body[0] !== sig[0] || req.body[1] !== sig[1]) bad('Upload a JPEG, PNG or WebP image');
+    await pool.query(`INSERT INTO app_images(key, mime, data) VALUES ('login_bg', $1, $2)
+                      ON CONFLICT (key) DO UPDATE SET mime=EXCLUDED.mime, data=EXCLUDED.data, updated_at=now()`, [mime, req.body]);
+    done(res, 'settings');
+  }));
+  r.delete('/login-bg', wrap(async (req, res) => {
+    await pool.query("DELETE FROM app_images WHERE key='login_bg'");
     done(res, 'settings');
   }));
 

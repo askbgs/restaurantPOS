@@ -140,7 +140,18 @@ const printing = createPrinting({ pool, tx, listeners, CONFIG, wrap, HttpError }
 app.use('/bridge', printing.bridge);
 
 // ---------- auth ----------
-app.get('/api/config', (req, res) => res.json(CONFIG));
+app.get('/api/config', wrap(async (req, res) => {
+  const { rows: [bg] } = await pool.query("SELECT extract(epoch FROM updated_at)::bigint AS v FROM app_images WHERE key='login_bg'");
+  res.json({ ...CONFIG, loginBg: bg ? `/login-bg?v=${bg.v}` : '/img/login-bg.jpg' });
+}));
+
+// Login background: the uploaded photo, or the built-in one. Public, because it shows before sign-in.
+app.get('/login-bg', wrap(async (req, res) => {
+  const { rows: [img] } = await pool.query("SELECT mime, data FROM app_images WHERE key='login_bg'");
+  if (!img) return res.redirect('/img/login-bg.jpg');
+  res.set({ 'Content-Type': img.mime, 'Cache-Control': req.query.v ? 'public, max-age=31536000, immutable' : 'no-cache', 'X-Content-Type-Options': 'nosniff' });
+  res.send(img.data);
+}));
 
 // Dish photos are public (no session needed) and cached; the ?v= version changes on every upload.
 app.get('/menu-img/:id', wrap(async (req, res) => {

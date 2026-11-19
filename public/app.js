@@ -98,16 +98,28 @@
   let pin = '';
   function renderLogin(err = '') {
     modalEl.innerHTML = '';
-    root.innerHTML = `
-      <div class="login"><div class="login-box">
+    const box = `
         <div class="hd"><div class="eyebrow">${esc(S.cfg?.terminal || '')}</div><h1>${esc(S.cfg?.restaurant || 'POS')}</h1>
           <div class="muted" style="margin-top:4px">Enter your staff PIN</div></div>
         <div class="pin-dots">${[0, 1, 2, 3].map((i) => `<i class="${i < pin.length ? 'f' : ''}"></i>`).join('')}${pin.length > 4 ? `<span>+${pin.length - 4}</span>` : ''}</div>
         <div class="login-err">${esc(err)}</div>
         <div class="pad">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `<button type="button" data-act="pin" data-k="${n}">${n}</button>`).join('')}
           <button type="button" data-act="pin" data-k="back">⌫</button><button type="button" data-act="pin" data-k="0">0</button>
-          <button type="button" data-act="pin" data-k="ok" style="background:var(--red);color:#fff">→</button></div>
-      </div></div>`;
+          <button type="button" data-act="pin" data-k="ok" style="background:var(--red);color:#fff">→</button></div>`;
+    // keep the background (and its fade-in) in place while typing; only the PIN box redraws
+    const existing = root.querySelector('.login .login-box');
+    if (existing) { existing.innerHTML = box; return; }
+    const bg = S.cfg?.loginBg || '/img/login-bg.jpg';
+    root.innerHTML = `
+      <div class="login">
+        <div class="login-bg" style="background-image:url('${esc(bg)}')"></div>
+        <div class="login-fade"></div>
+        <div class="login-box">${box}</div>
+      </div>`;
+    // start the fade once the photo has loaded, so it never pops in half-drawn
+    const im = new Image();
+    im.onload = im.onerror = () => root.querySelector('.login-bg')?.classList.add('loaded');
+    im.src = bg;
   }
   async function pinKey(k) {
     if (k === 'back') pin = pin.slice(0, -1);
@@ -473,10 +485,10 @@
   }
   function resetImg() { if (S.admin.img) URL.revokeObjectURL(S.admin.img.url); S.admin.img = null; S.admin.imgRemove = false; }
   // Shrink to max 800px and re-encode as JPEG in the browser so uploads stay small.
-  async function resizeImage(file) {
+  async function resizeImage(file, maxSide = 800) {
     if (!file.type.startsWith('image/')) throw new Error('Choose an image file');
     const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => { throw new Error('Could not read that image'); });
-    const k = Math.min(1, 800 / Math.max(bmp.width, bmp.height));
+    const k = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
     const cv = document.createElement('canvas');
     cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
     const ctx = cv.getContext('2d');
@@ -618,6 +630,11 @@
           <button type="submit" class="btn red" style="min-width:200px;text-align:center">Save settings</button>
         </form>
         <div class="settings-form" style="margin-top:8px;border-top:1px solid var(--line);padding-top:22px">
+          <h3 style="margin:0 0 6px">Login screen background</h3>
+          <div class="muted" style="margin-bottom:12px">A photo of your restaurant behind the PIN pad. It's resized to 1920 px and faded slightly so the keypad stays easy to read.</div>
+          <div class="img-edit" style="margin-bottom:26px"><div class="img-box bg-box"><img src="${esc(S.cfg.loginBg)}" alt=""></div>
+            <div class="img-actions"><label class="btn" style="cursor:pointer">Choose photo<input type="file" id="login-bg-file" accept="image/*" hidden></label>
+              ${S.cfg.loginBg.startsWith('/login-bg') ? '<button type="button" class="link-red" data-act="login-bg-reset">Use the default background</button>' : '<small class="muted">Showing the built-in background.</small>'}</div></div>
           <h3 style="margin:0 0 6px">Sample menu</h3>
           <div class="muted" style="margin-bottom:12px">Replace the menu with Short Eats, Sri Lankan, Indian, Chinese, Thai, Japanese, Korean, Desserts and Drinks.</div>
           <button type="button" class="btn" data-act="admin-sample-menu">Load Asian menu</button>
@@ -1264,6 +1281,11 @@
         } };
       renderModal();
     },
+    'login-bg-reset': async () => {
+      await api('/admin/login-bg', { method: 'DELETE' });
+      S.cfg = await fetch('/api/config').then((x) => x.json());
+      toast('Back to the default background'); render();
+    },
     'admin-cancel': () => { resetImg(); S.admin.sel = null; render(); },
     'admin-addon-add': () => { $('#addons').insertAdjacentHTML('beforeend', addonRow()); $('#addons .addon-row:last-child input').focus(); },
     'admin-addon-del': (d, el) => el.closest('.addon-row').remove(),
@@ -1404,6 +1426,15 @@
     }
   });
   document.addEventListener('change', (e) => {
+    if (e.target.id === 'login-bg-file' && e.target.files[0]) {
+      run(async () => {
+        const blob = await resizeImage(e.target.files[0], 1920);
+        const res = await fetch('/api/admin/login-bg', { method: 'PUT', headers: { 'Content-Type': 'image/jpeg' }, body: blob, credentials: 'same-origin' });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Upload failed');
+        S.cfg = await fetch('/api/config').then((x) => x.json());
+        toast('Login background updated'); render();
+      })();
+    }
     if (e.target.id === 'audit-filter') { S.admin.auditFilter = e.target.value; run(async () => { await loadAudit(); render(); })(); }
     if (e.target.id === 'img-file' && e.target.files[0]) {
       run(async () => {
