@@ -158,6 +158,7 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
       price_cents: price,
       tags: String(b.tags || '').split(',').map((t) => t.trim()).filter(Boolean).slice(0, 8),
       has_spice: !!b.has_spice,
+      no_kot: b.send_kot === false,
       active: b.active !== false,
       sort: int(b.sort, 0),
       addons,
@@ -174,9 +175,9 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     const m = itemBody(req.body);
     const id = await tx(async (c) => {
       const { rows: [row] } = await c.query(
-        `INSERT INTO menu_items(category_id, station_id, name, price_cents, tags, has_spice, active, sort)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-        [m.category_id, m.station_id, m.name, m.price_cents, tagsFor(m), m.has_spice, m.active, m.sort]);
+        `INSERT INTO menu_items(category_id, station_id, name, price_cents, tags, has_spice, active, sort, no_kot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+        [m.category_id, m.station_id, m.name, m.price_cents, tagsFor(m), m.has_spice, m.active, m.sort, m.no_kot]);
       await saveAddons(c, row.id, m.addons);
       return row.id;
     });
@@ -210,8 +211,8 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     const id = int(req.params.id);
     await tx(async (c) => {
       const u = await c.query(
-        `UPDATE menu_items SET category_id=$2, station_id=$3, name=$4, price_cents=$5, tags=$6, has_spice=$7, active=$8, sort=$9 WHERE id=$1`,
-        [id, m.category_id, m.station_id, m.name, m.price_cents, tagsFor(m), m.has_spice, m.active, m.sort]);
+        `UPDATE menu_items SET category_id=$2, station_id=$3, name=$4, price_cents=$5, tags=$6, has_spice=$7, active=$8, sort=$9, no_kot=$10 WHERE id=$1`,
+        [id, m.category_id, m.station_id, m.name, m.price_cents, tagsFor(m), m.has_spice, m.active, m.sort, m.no_kot]);
       if (!u.rowCount) throw new HttpError(404, 'Dish not found');
       await saveAddons(c, id, m.addons);
     });

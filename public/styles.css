@@ -316,6 +316,11 @@ label.check input { width: 20px; height: 20px; accent-color: var(--ink); }
 .dish-cell { display: flex; gap: 12px; align-items: center; }
 .dish-cell img, .dish-cell .noimg { width: 52px; height: 36px; object-fit: cover; border: 1px solid var(--soft); flex: none; background: #e9e8e6; }
 
+/* ---------- served without KOT ---------- */
+.nokot-btn { border: 1px solid var(--ink) !important; width: auto !important; padding: 0 10px; font-size: 12.5px; font-weight: 700; height: 28px !important; margin-left: auto; }
+.badge.direct { background: var(--ink); color: #fff; }
+.ready-tag { color: var(--ink); font-weight: 800; }
+
 /* ---------- voids / approvals ---------- */
 .void-btn { border: 1px solid var(--red-ink) !important; color: var(--red-ink); width: auto !important; padding: 0 10px; font-size: 12.5px; font-weight: 700; height: 24px !important; }
 .line.voided .r span:first-child, .sec .r.voided span:nth-child(2) { text-decoration: line-through; color: var(--muted); }

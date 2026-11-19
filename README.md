@@ -42,6 +42,11 @@ Admin safeguards:
 - **Close shift**: count the drawer, either by entering the total or with the Rs 5000 → Rs 1 note and coin counter. The app shows over, short or balanced, saves the result and prints the **Z report**. **Print X report** prints the figures so far without closing.
 - Expected cash = float + cash sales − cash refunds + cash in − cash out.
 
+### Items without a kitchen ticket
+- **Per dish:** in Admin → Menu items, untick **Send to kitchen** for ready-made items (bottled drinks, cakes, pre-made short eats). Adding them to an order marks them **Served · no KOT** straight away.
+- **Per order line:** tap **No KOT** on an unsent line, or choose **Already prepared** in the Options box, when a dish is already cooked.
+- These items are billed and reported like any other. Once served, removing one needs a Manager-approved **Void**, the same as a sent item. Each per-line "No KOT" is recorded in the audit log.
+
 ### Voids, refunds and manager approval
 - **Before a dish is sent**, staff can remove it freely with −.
 - **After it's sent**, **Void** on the line needs a reason and a Manager PIN. A Manager doesn't need to enter a PIN. The kitchen gets a VOID slip, and the bill total updates.

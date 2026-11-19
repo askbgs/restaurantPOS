@@ -244,3 +244,7 @@ CREATE TABLE IF NOT EXISTS print_jobs (
   printed_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS print_jobs_pending_idx ON print_jobs(status, created_at);
+
+-- v6: items that are served without a kitchen ticket (ready-made, already cooked)
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS no_kot BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS served_direct BOOLEAN NOT NULL DEFAULT FALSE;

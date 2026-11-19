@@ -32,6 +32,7 @@
   const mins = (d) => Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / 60000));
   const pct = (f) => `${+(f * 100).toFixed(3)}%`;
   const orderTitle = (o) => (o.type === 'dinein' ? `Table ${o.table_code}` : `${TYPE_LABEL[o.type]} #${o.order_no}`);
+  const isPending = (i) => !i.kot_id && !i.served_direct;
   const lineTotal = (i) => (i.qty - (i.void_qty || 0)) * (i.unit_price_cents + i.addons_cents);
 
   function toast(msg, err) {
@@ -235,7 +236,7 @@
         <div class="dish">
           <button type="button" class="add" data-act="quick-add" data-id="${i.id}">
             ${i.image_ver ? `<img class="dish-img" src="/menu-img/${i.id}?v=${i.image_ver}" alt="" loading="lazy">` : ''}
-            <span class="n">${esc(i.name)}</span><span class="tags">${i.tags.map(esc).join(' · ')}</span><span class="p">${money(i.price_cents)}</span>
+            <span class="n">${esc(i.name)}</span><span class="tags">${i.tags.map(esc).join(' · ')}${i.no_kot ? `${i.tags.length ? ' · ' : ''}<b class="ready-tag">Ready · no KOT</b>` : ''}</span><span class="p">${money(i.price_cents)}</span>
           </button>
           <button type="button" class="opt" data-act="options" data-id="${i.id}">Options</button>
         </div>`).join('') || '<div class="empty">No dishes found.</div>'}</div>`;
@@ -246,7 +247,7 @@
     const o = S.order;
     const cats = S.menu.categories;
     if (!S.cat) S.cat = cats[0]?.id;
-    const pending = o.items.filter((i) => !i.kot_id);
+    const pending = o.items.filter(isPending);
     const byCourse = COURSES.map((c) => [c, o.items.filter((i) => i.course === c)]).filter(([, l]) => l.length);
     const ticketTotal = o.subtotal_cents - o.discount_cents + o.tax_cents;
     return `
@@ -264,7 +265,7 @@
               <div class="muted" style="font-size:14px">Opened ${clock(o.opened_at)} · ${mins(o.opened_at)} min · ${esc(o.staff_name || '')}</div>
               ${o.type !== 'dinein' && o.customer_name ? `<div style="font-size:14px;margin-top:4px">${esc(o.customer_name)}${o.phone ? ' · ' + esc(o.phone) : ''}</div>` : ''}
               ${o.address ? `<div class="muted" style="font-size:13px">${esc(o.address)}</div>` : ''}
-              <button type="button" class="link-red" style="margin-top:8px" data-act="void">${o.kots.length ? 'Void order' : 'Cancel order'}</button>
+              <button type="button" class="link-red" style="margin-top:8px" data-act="void">${o.kots.length || o.items.some((i) => i.served_direct) ? 'Void order' : 'Cancel order'}</button>
             </div>
             ${o.type === 'dinein' ? `<div><div class="muted" style="font-size:12px;margin-bottom:4px">Guests</div>
               <div class="stepper"><button type="button" data-act="guests" data-d="-1">−</button><span>${o.guests}</span><button type="button" data-act="guests" data-d="1">+</button></div></div>` : ''}
@@ -304,10 +305,11 @@
       <div class="r"><span>${left} × ${esc(i.name)}</span><span>${left === 0 ? 'VOID' : money(lineTotal(i))}</span></div>
       ${modsHtml(i) ? `<div class="mods">${modsHtml(i)}</div>` : ''}
       ${i.void_qty ? `<div class="mods note-red">${i.void_qty} voided</div>` : ''}
-      ${i.kot_id ? `<div class="ctl"><span class="badge" style="margin-top:0">KOT #${i.kot_no} · ${KOT_LABEL[i.kot_status]}</span>
+      ${i.kot_id || i.served_direct ? `<div class="ctl"><span class="badge ${i.served_direct ? 'direct' : ''}" style="margin-top:0">${i.served_direct ? 'Served · no KOT' : `KOT #${i.kot_no} · ${KOT_LABEL[i.kot_status]}`}</span>
            ${left > 0 ? `<button type="button" class="void-btn" data-act="void-item" data-id="${i.id}">Void</button>` : ''}</div>`
         : `<div class="ctl"><button type="button" data-act="qty" data-id="${i.id}" data-q="${i.qty - 1}">−</button><button type="button" data-act="qty" data-id="${i.id}" data-q="${i.qty + 1}">+</button>
-           <span class="badge new" style="margin-top:0">New · not sent</span></div>`}
+           <span class="badge new" style="margin-top:0">New · not sent</span>
+           <button type="button" class="nokot-btn" data-act="no-kot" data-id="${i.id}" title="Already cooked or ready-made: mark served without a kitchen ticket">No KOT</button></div>`}
     </div>`;
   }
 
@@ -357,7 +359,7 @@
   function billView() {
     const o = S.order;
     if (!o) return startView();
-    const pending = o.items.filter((i) => !i.kot_id);
+    const pending = o.items.filter(isPending);
     const segBtn = (act, val, cur, label, extra = '') => `<button type="button" class="${String(val) === String(cur) ? 'on' : ''}" data-act="${act}" data-v="${val}" ${extra}>${label}</button>`;
     const per = o.split_ways > 1 ? Math.ceil(o.total_cents / o.split_ways) : 0;
     return `
@@ -502,7 +504,9 @@
         + `<div class="two">${field(`Price (${esc(S.cfg.currency.trim())})`, inp('price', major(rec.price_cents), 'inputmode="decimal" required'))}
              ${field('Sort order', inp('sort', rec.sort, 'inputmode="numeric"'))}</div>`
         + field('Tags', inp('tags', rec.tags.filter((t) => t !== 'Spice level').join(', '), 'placeholder="Wok, Veg"'), 'Comma separated. Shown under the dish name.')
-        + `<div class="field">${check('has_spice', rec.has_spice, 'Ask for spice level')}${check('active', rec.active, 'Show on menu')}</div>`
+        + `<div class="field">${check('has_spice', rec.has_spice, 'Ask for spice level')}${check('active', rec.active, 'Show on menu')}
+             ${check('send_kot', !rec.no_kot, 'Send to kitchen (print a KOT)')}
+             <small style="margin-top:-4px">Untick for ready-made items such as bottled drinks, cakes or pre-made short eats. They are served straight away, and staff can still choose per order.</small></div>`
         + `<div class="field"><label>Photo</label>
              <div class="img-edit"><div class="img-box" id="img-box">${imgPreview(rec)}</div>
                <div class="img-actions"><label class="btn" style="cursor:pointer">Choose photo<input type="file" id="img-file" accept="image/*" hidden></label>
@@ -568,7 +572,7 @@
           ${list.map((i) => `<tr class="${selRow('item', i.id)}" data-act="admin-sel" data-kind="item" data-id="${i.id}">
             <td class="name"><div class="dish-cell">${i.image_ver ? `<img src="/menu-img/${i.id}?v=${i.image_ver}" alt="" loading="lazy">` : '<span class="noimg"></span>'}
               <div><b>${esc(i.name)}</b><div class="muted" style="font-size:12.5px">${i.tags.map(esc).join(' · ')}</div></div></div></td><td>${esc(catName(i.category_id))}</td><td>${esc(stName(i.station_id))}</td>
-            <td>${i.addons.length || '—'}</td><td><span class="s ${i.active ? 'paid' : 'void'}">${i.active ? 'On menu' : 'Hidden'}</span></td><td style="text-align:right"><b>${money(i.price_cents)}</b></td></tr>`).join('')
+            <td>${i.addons.length || '—'}</td><td><span class="s ${i.active ? 'paid' : 'void'}">${i.active ? 'On menu' : 'Hidden'}</span>${i.no_kot ? '<div class="muted" style="font-size:12px">No KOT</div>' : ''}</td><td style="text-align:right"><b>${money(i.price_cents)}</b></td></tr>`).join('')
             || '<tr><td colspan="6" class="muted">No dishes match.</td></tr>'}</tbody></table></div>`;
     }
     if (A.section === 'categories') {
@@ -650,9 +654,10 @@
   function readAdminForm() {
     const f = $('#admin-form');
     const fd = new FormData(f);
-    const body = Object.fromEntries([...fd.entries()].filter(([k]) => !['has_spice', 'active'].includes(k)));
+    const body = Object.fromEntries([...fd.entries()].filter(([k]) => !['has_spice', 'active', 'send_kot'].includes(k)));
     if (f.querySelector('[name="has_spice"]')) body.has_spice = fd.has('has_spice');
     if (f.querySelector('[name="active"]')) body.active = fd.has('active');
+    if (f.querySelector('[name="send_kot"]')) body.send_kot = fd.has('send_kot');
     if (S.admin.sel.kind === 'item') {
       body.addons = [...f.querySelectorAll('.addon-row')].map((r) => ({ name: r.querySelector('[data-f="name"]').value, price: r.querySelector('[data-f="price"]').value || 0 }));
     }
@@ -958,7 +963,7 @@
         <button type="button" class="btn" data-act="admin-cancel">Cancel</button>
         <button type="submit" class="btn red">Save</button></div></form>`;
   }
-  const AUDIT_FILTERS = [['', 'Everything'], ['item.void', 'Item voids'], ['order.void', 'Order voids'], ['order.refund', 'Refunds'], ['order.discount', 'Discounts'],
+  const AUDIT_FILTERS = [['', 'Everything'], ['item.void', 'Item voids'], ['order.void', 'Order voids'], ['order.refund', 'Refunds'], ['order.discount', 'Discounts'], ['item.no_kot', 'Served without KOT'],
     ['bill.', 'Bills & reprints'], ['shift.', 'Shifts'], ['cash.', 'Cash in / out'], ['login', 'Sign-ins'], ['admin.', 'Admin changes']];
   function auditList() {
     const A = S.admin;
@@ -990,6 +995,9 @@
             <div class="chips">${i.addons.map((a) => `<button type="button" class="chip ${m.addons.has(a.id) ? 'on' : ''}" data-act="opt-addon" data-id="${a.id}">${esc(a.name)}<small>+${money(a.price_cents)}</small></button>`).join('')}</div></div>` : ''}
           <div class="msec"><div class="hd"><b>Course</b><small>Mains and desserts can be held until fired</small></div>
             <div class="chips">${COURSES.map((c) => `<button type="button" class="chip ${m.course === c ? 'on' : ''}" data-act="opt-course" data-v="${c}">${COURSE_LABEL[c]}${c === m.defCourse ? '<small>Default</small>' : ''}</button>`).join('')}</div></div>
+          <div class="msec"><div class="hd"><b>Kitchen ticket</b><small>${m.item.no_kot ? 'This dish is ready-made by default' : 'Untick if it is already cooked'}</small></div>
+            <div class="chips"><button type="button" class="chip ${m.sendKot ? 'on' : ''}" data-act="opt-kot" data-v="1">Send to kitchen<small>Prints a KOT</small></button>
+              <button type="button" class="chip ${!m.sendKot ? 'on' : ''}" data-act="opt-kot" data-v="0">Already prepared<small>Served now, no KOT</small></button></div></div>
           <div class="msec" style="border-bottom:0"><div class="hd"><b>Kitchen note</b><small>Allergies, no onion, etc.</small></div>
             <textarea id="opt-note" rows="2" maxlength="200" placeholder="e.g. No peanuts">${esc(m.note)}</textarea></div>
         </div>
@@ -1045,7 +1053,7 @@
   }
 
   function kotGroups(mode, hold) {
-    const pending = S.order.items.filter((i) => !i.kot_id);
+    const pending = S.order.items.filter(isPending);
     const groups = new Map();
     for (const it of pending) {
       const held = hold && (it.course === 'main' || it.course === 'dessert');
@@ -1150,24 +1158,30 @@
     options: (d) => {
       const cat = S.menu.categories.find((c) => c.items.some((i) => String(i.id) === d.id));
       const item = cat.items.find((i) => String(i.id) === d.id);
-      S.modal = { kind: 'options', item, catName: cat.name, defCourse: cat.default_course, course: cat.default_course, spice: 'Standard', addons: new Set(), note: '', qty: 1 };
+      S.modal = { kind: 'options', item, catName: cat.name, defCourse: cat.default_course, course: cat.default_course, spice: 'Standard', addons: new Set(), note: '', qty: 1, sendKot: !item.no_kot };
       renderModal();
     },
     'opt-spice': (d) => { S.modal.spice = d.v; keepNote(); renderModal(); },
     'opt-addon': (d) => { const id = +d.id; S.modal.addons.has(id) ? S.modal.addons.delete(id) : S.modal.addons.add(id); keepNote(); renderModal(); },
     'opt-course': (d) => { S.modal.course = d.v; keepNote(); renderModal(); },
+    'opt-kot': (d) => { S.modal.sendKot = d.v === '1'; keepNote(); renderModal(); },
     'opt-qty': (d) => { S.modal.qty = Math.max(1, S.modal.qty + +d.d); keepNote(); renderModal(); },
     'opt-add': async () => {
       keepNote();
       const m = S.modal;
-      S.order = await api(`/orders/${S.order.id}/items`, { body: { menu_item_id: m.item.id, qty: m.qty, spice: m.spice, addon_ids: [...m.addons], course: m.course, note: m.note.trim() } });
+      S.order = await api(`/orders/${S.order.id}/items`, { body: { menu_item_id: m.item.id, qty: m.qty, spice: m.spice, addon_ids: [...m.addons], course: m.course, note: m.note.trim(), no_kot: !m.sendKot } });
       S.modal = null; render();
     },
     qty: async (d) => { S.order = await api('/items/' + d.id, { method: 'PATCH', body: { qty: +d.q } }); render(); },
+    'no-kot': async (d) => {
+      const i = S.order.items.find((x) => String(x.id) === d.id);
+      S.order = await api('/items/' + d.id, { method: 'PATCH', body: { served_direct: true } });
+      toast(`${i.qty} × ${i.name} served without a kitchen ticket`); render();
+    },
     guests: async (d) => { S.order = await api('/orders/' + S.order.id, { method: 'PATCH', body: { guests: Math.max(1, S.order.guests + +d.d) } }); render(); },
     void: () => {
       const o = S.order;
-      if (o.kots.length) {
+      if (o.kots.length || o.items.some((i) => i.served_direct)) {
         return formModal({ eyebrow: 'Void order', title: `Void ${orderTitle(o)}?`, roles: ['Manager'], submit: 'Void order', reasons: VOID_REASONS,
           body: `<p class="muted" style="margin-top:0">Everything on this order is cancelled and the kitchen gets a VOID slip for tickets still cooking. ${money(o.total_cents)} will not be charged.</p>`,
           onSubmit: async (v) => {
@@ -1201,7 +1215,7 @@
     },
     charge: () => {
       const o = S.order;
-      const pending = o.items.filter((i) => !i.kot_id).length;
+      const pending = o.items.filter(isPending).length;
       if (!S.shift?.shift) {
         S.modal = { kind: 'confirm', title: 'Open a shift first', text: 'Payments are recorded against the open shift so the cash drawer can be balanced at the end of the day.', yes: 'Go to Shift',
           run: async () => { S.modal = null; await setTab('shift'); } };
@@ -1263,7 +1277,7 @@
       const i = S.order.items.find((x) => String(x.id) === d.id);
       const left = eq(i);
       formModal({ eyebrow: 'Void item', title: `Void ${i.name}`, roles: ['Manager'], submit: 'Void', reasons: VOID_REASONS,
-        body: `<p class="muted" style="margin-top:0">Already sent on KOT #${i.kot_no}. The kitchen will get a VOID slip.</p>
+        body: `<p class="muted" style="margin-top:0">${i.served_direct ? 'Already served without a kitchen ticket.' : `Already sent on KOT #${i.kot_no}. The kitchen will get a VOID slip.`}</p>
           ${left > 1 ? `<label>How many to void (of ${left})</label><input name="qty" type="number" min="1" max="${left}" value="${left}" required>` : '<input type="hidden" name="qty" value="1">'}`,
         onSubmit: async (v) => { S.order = await api(`/items/${i.id}/void`, { body: v }); S.modal = null; toast(`Voided ${v.qty} × ${i.name}`); render(); } });
     },

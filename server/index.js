@@ -81,7 +81,7 @@ const ORDER_SUMMARY_SQL = `
     (SELECT count(*)::int FROM order_items i WHERE i.order_id=o.id) AS item_count,
     (SELECT coalesce(sum(qty - void_qty),0)::int FROM order_items i WHERE i.order_id=o.id) AS item_qty,
     (SELECT coalesce(sum(amount_cents),0)::int FROM refunds r WHERE r.order_id=o.id) AS refunded_cents,
-    (SELECT count(*)::int FROM order_items i WHERE i.order_id=o.id AND i.kot_id IS NULL) AS pending_items,
+    (SELECT count(*)::int FROM order_items i WHERE i.order_id=o.id AND i.kot_id IS NULL AND NOT i.served_direct) AS pending_items,
     (SELECT count(*)::int FROM kots k WHERE k.order_id=o.id) AS kot_count,
     (SELECT count(*)::int FROM kots k WHERE k.order_id=o.id AND k.status IN ('held','new','cooking')) AS kot_live,
     (SELECT count(*)::int FROM kots k WHERE k.order_id=o.id AND k.status='ready') AS kot_ready
@@ -310,18 +310,20 @@ app.post('/api/orders/:id/items', wrap(async (req, res) => {
     const course = ['drink', 'starter', 'main', 'dessert'].includes(req.body.course) ? req.body.course : m.default_course;
     const spice = m.has_spice && req.body.spice && req.body.spice !== 'Standard' ? String(req.body.spice).slice(0, 20) : null;
     const note = req.body.note ? String(req.body.note).slice(0, 200) : null;
+    // served without a KOT: the dish's own setting, unless the line says otherwise
+    const direct = typeof req.body.no_kot === 'boolean' ? req.body.no_kot : m.no_kot;
     // merge with an identical unsent line
     const { rows: [same] } = await c.query(
       `SELECT id FROM order_items WHERE order_id=$1 AND kot_id IS NULL AND menu_item_id=$2 AND course=$3
-         AND spice IS NOT DISTINCT FROM $4 AND note IS NOT DISTINCT FROM $5 AND addons=$6::jsonb`,
-      [id, m.id, course, spice, note, JSON.stringify(addons)]);
+         AND spice IS NOT DISTINCT FROM $4 AND note IS NOT DISTINCT FROM $5 AND addons=$6::jsonb AND served_direct=$7 AND void_qty=0`,
+      [id, m.id, course, spice, note, JSON.stringify(addons), direct]);
     if (same) {
       await c.query('UPDATE order_items SET qty=qty+$2 WHERE id=$1', [same.id, qty]);
     } else {
       await c.query(
-        `INSERT INTO order_items(order_id, menu_item_id, station_id, name, qty, unit_price_cents, addons, addons_cents, spice, course, note)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-        [id, m.id, m.station_id, m.name, qty, m.price_cents, JSON.stringify(addons), addons.reduce((s, a) => s + a.price_cents, 0), spice, course, note]);
+        `INSERT INTO order_items(order_id, menu_item_id, station_id, name, qty, unit_price_cents, addons, addons_cents, spice, course, note, served_direct, done)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)`,
+        [id, m.id, m.station_id, m.name, qty, m.price_cents, JSON.stringify(addons), addons.reduce((s, a) => s + a.price_cents, 0), spice, course, note, direct]);
     }
     await saveTotals(c, id);
     return id;
@@ -337,8 +339,14 @@ app.patch('/api/items/:id', wrap(async (req, res) => {
     const { rows: [i] } = await c.query(
       "SELECT i.* FROM order_items i JOIN orders o ON o.id=i.order_id WHERE i.id=$1 AND o.status='open'", [itemId]);
     if (!i) bad('Item not found');
-    if (i.kot_id) bad('Already sent to the kitchen');
-    if (!qty || qty < 1) await c.query('DELETE FROM order_items WHERE id=$1', [itemId]);
+    if (i.kot_id) bad('Already sent to the kitchen. Use Void to remove it.');
+    if (i.served_direct) bad('Already served. Use Void to remove it.');
+    if (req.body.served_direct === true) {
+      await c.query('UPDATE order_items SET served_direct=TRUE, done=TRUE WHERE id=$1', [itemId]);
+      const { rows: [o] } = await c.query(`${ORDER_SUMMARY_SQL} WHERE o.id=$1`, [i.order_id]);
+      await audit(c, { action: 'item.no_kot', staffId: req.user.id, orderId: i.order_id,
+        summary: `${i.qty} × ${i.name} served without KOT on ${otitle(o)}` });
+    } else if (!qty || qty < 1) await c.query('DELETE FROM order_items WHERE id=$1', [itemId]);
     else await c.query('UPDATE order_items SET qty=$2 WHERE id=$1', [itemId, qty]);
     await saveTotals(c, i.order_id);
     return i.order_id;
@@ -377,7 +385,7 @@ async function printKot(c, kotId, staffName, flag) {
 
 // Groups unsent lines into KOTs (per station or one combined ticket). Returns the created KOTs.
 async function createKots(c, id, mode, holdLater, staffId, staffName) {
-    const { rows: pending } = await c.query('SELECT * FROM order_items WHERE order_id=$1 AND kot_id IS NULL ORDER BY id', [id]);
+    const { rows: pending } = await c.query('SELECT * FROM order_items WHERE order_id=$1 AND kot_id IS NULL AND NOT served_direct ORDER BY id', [id]);
     if (!pending.length) return [];
     const { rows: [prev] } = await c.query('SELECT count(*)::int AS n FROM kots WHERE order_id=$1', [id]);
     const isAddon = prev.n > 0;
@@ -466,7 +474,9 @@ app.post('/api/orders/:id/pay', wrap(async (req, res) => {
 
 app.post('/api/orders/:id/void', wrap(async (req, res) => {
   const id = int(req.params.id);
-  const { rows: [pre] } = await pool.query('SELECT count(*)::int AS n FROM kots WHERE order_id=$1', [id]);
+  const { rows: [pre] } = await pool.query(
+    'SELECT (SELECT count(*) FROM kots WHERE order_id=$1) + (SELECT count(*) FROM order_items WHERE order_id=$1 AND served_direct) AS n', [id]);
+  pre.n = Number(pre.n);
   const sentToKitchen = pre.n > 0;
   const why = sentToKitchen ? reason(req.body.reason) : String(req.body.reason || 'Cancelled before sending').slice(0, 200);
   const approvedBy = sentToKitchen ? await approval(req) : req.user.id;
@@ -477,7 +487,7 @@ app.post('/api/orders/:id/void', wrap(async (req, res) => {
     const r = await c.query("UPDATE orders SET status='void', closed_at=now(), shift_id=$2 WHERE id=$1 AND status='open'", [id, shift ? shift.id : null]);
     if (!r.rowCount) bad('Order is closed');
     // record every sent line as voided, and tell the kitchen
-    for (const i of o.items.filter((x) => x.kot_id && x.qty > x.void_qty)) {
+    for (const i of o.items.filter((x) => (x.kot_id || x.served_direct) && x.qty > x.void_qty)) {
       const q = i.qty - i.void_qty;
       await c.query(`INSERT INTO item_voids(order_id, order_item_id, name, qty, amount_cents, reason, staff_id, approved_by, shift_id)
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
@@ -512,7 +522,7 @@ app.post('/api/items/:id/void', wrap(async (req, res) => {
        LEFT JOIN stations st ON st.id=i.station_id WHERE i.id=$1 FOR UPDATE OF i`, [itemId]);
     if (!i) throw new HttpError(404, 'Item not found');
     if (i.order_status !== 'open') bad('Order is closed. Use a refund instead.');
-    if (!i.kot_id) bad('This item has not been sent. Remove it with the − button.');
+    if (!i.kot_id && !i.served_direct) bad('This item has not been sent. Remove it with the − button.');
     const left = i.qty - i.void_qty;
     const q = Math.min(left, Math.max(1, int(req.body.qty) || left));
     if (left <= 0) bad('Already voided');
@@ -522,11 +532,13 @@ app.post('/api/items/:id/void', wrap(async (req, res) => {
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [i.order_id, itemId, i.name, q, q * (i.unit_price_cents + i.addons_cents), why, req.user.id, approvedBy, shift ? shift.id : null]);
     // a ticket whose every line is voided leaves the kitchen screen
-    const { rows: [rest] } = await c.query('SELECT count(*)::int AS n FROM order_items WHERE kot_id=$1 AND qty > void_qty', [i.kot_id]);
-    if (!rest.n) await c.query("UPDATE kots SET status='served', served_at=now() WHERE id=$1 AND status<>'served'", [i.kot_id]);
+    if (i.kot_id) {
+      const { rows: [rest] } = await c.query('SELECT count(*)::int AS n FROM order_items WHERE kot_id=$1 AND qty > void_qty', [i.kot_id]);
+      if (!rest.n) await c.query("UPDATE kots SET status='served', served_at=now() WHERE id=$1 AND status<>'served'", [i.kot_id]);
+    }
     await saveTotals(c, i.order_id);
     const o = await loadOrder(i.order_id, c);
-    if (i.kot_status !== 'served') {
+    if (i.kot_id && i.kot_status !== 'served') {
       const pid = i.printer_id || await printing.printerFor(c, 'kitchen');
       await printing.enqueue(c, pid, 'void', `VOID · ${otitle(o)}`,
         printing.voidDoc({ order: o, kotNo: i.kot_no, stationName: i.station_name, name: i.name, qty: q, reason: why, staffName: req.user.name }));
