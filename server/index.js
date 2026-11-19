@@ -1,7 +1,8 @@
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
-const { pool, tx, migrate, checkPin, startListener, notify, listeners } = require('./db');
+const { pool, tx, migrate, hashPin, checkPin, startListener, notify, listeners } = require('./db');
+const adminRouter = require('./admin');
 
 const CONFIG = {
   restaurant: process.env.RESTAURANT_NAME || 'Ember & Bao',
@@ -119,6 +120,7 @@ async function auth(req, res, next) {
 app.use('/api', auth);
 
 app.get('/api/me', (req, res) => res.json(req.user));
+app.use('/api/admin', adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError }));
 app.post('/api/logout', wrap(async (req, res) => {
   await pool.query('DELETE FROM sessions WHERE token=$1', [req.token]);
   res.setHeader('Set-Cookie', 'pos_session=; Path=/; Max-Age=0');
@@ -150,7 +152,7 @@ app.get('/api/menu', wrap(async (req, res) => {
 // ---------- floor + queue ----------
 app.get('/api/floor', wrap(async (req, res) => {
   const { rows: areas } = await pool.query('SELECT * FROM areas ORDER BY sort, id');
-  const { rows: tables } = await pool.query('SELECT * FROM dining_tables ORDER BY sort, id');
+  const { rows: tables } = await pool.query('SELECT * FROM dining_tables WHERE active ORDER BY sort, id');
   const { rows: open } = await pool.query(`${ORDER_SUMMARY_SQL} WHERE o.status='open' ORDER BY o.opened_at`);
   for (const o of open) o.display_status = orderStatus(o);
   const byTable = Object.fromEntries(open.filter((o) => o.table_id).map((o) => [o.table_id, o]));
@@ -183,6 +185,8 @@ app.post('/api/orders', wrap(async (req, res) => {
   if (type === 'takeaway' && !req.body.customer_name) bad('Customer name is required');
   if (type === 'delivery' && (!req.body.customer_name || !req.body.address)) bad('Name and address are required');
   if (tableId) {
+    const { rows: [tbl] } = await pool.query('SELECT id FROM dining_tables WHERE id=$1 AND active', [tableId]);
+    if (!tbl) bad('Table not found');
     const { rows: [existing] } = await pool.query("SELECT id FROM orders WHERE table_id=$1 AND status='open'", [tableId]);
     if (existing) return res.json(await loadOrder(existing.id));
   }

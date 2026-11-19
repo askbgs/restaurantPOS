@@ -9,6 +9,7 @@
     areaFilter: 'all', cat: null, search: '',
     kitchen: null, station: 'all',
     history: null, histFilter: 'all', histSel: null, histOrder: null,
+    admin: { section: 'items', data: null, sel: null, cat: 'all', q: '' },
     payMethod: 'card', modal: null, live: false,
   };
   const COURSES = ['drink', 'starter', 'main', 'dessert'];
@@ -70,6 +71,7 @@
     if (S.tab === 'kitchen') jobs.push(loadKitchen());
     if (S.tab === 'history') jobs.push(loadHistory());
     await Promise.all(jobs);
+    if (S.tab === 'admin') { const h = $('header.topbar'); if (h) h.outerHTML = header(); return; }
     render();
   }
 
@@ -79,7 +81,10 @@
   function connectEvents() {
     const es = new EventSource('/api/events');
     es.onopen = () => { S.live = true; updateLiveDot(); };
-    es.onmessage = () => scheduleRefresh();
+    es.onmessage = (e) => {
+      if (e.data === 'menu') api('/menu').then((m) => { S.menu = m; }).catch(() => {});
+      scheduleRefresh();
+    };
     es.onerror = () => { S.live = false; updateLiveDot(); };
   }
   function updateLiveDot() { const d = $('.live-dot'); if (d) d.classList.toggle('off', !S.live); }
@@ -129,6 +134,7 @@
           ${tab('kitchen', 'Kitchen', `${f.live_tickets ?? 0} live tickets`)}
           ${tab('bill', 'Bill', o ? money(o.total_cents) : 'No order', !o)}
           ${tab('history', 'History', `${f.closed_today ?? 0} closed`)}
+          ${isManager() ? tab('admin', 'Admin', 'Menu & staff') : ''}
         </nav>
         <div class="top-right">
           <span class="live-dot ${S.live ? '' : 'off'}" title="Live updates"></span>
@@ -427,6 +433,167 @@
       </section>`;
   }
 
+  // ---------- admin ----------
+  const ADMIN_SECTIONS = [['items', 'Menu items'], ['categories', 'Categories'], ['floor', 'Floor & tables'], ['stations', 'Stations'], ['staff', 'Staff']];
+  const ADMIN_PATH = { item: 'items', category: 'categories', area: 'areas', table: 'tables', station: 'stations', staff: 'staff' };
+  const ADMIN_NOUN = { item: 'dish', category: 'category', area: 'area', table: 'table', station: 'station', staff: 'staff member' };
+  const isManager = () => S.user?.role === 'Manager';
+  const major = (c) => ((c || 0) / 100).toFixed(2);
+  async function loadAdmin() { S.admin.data = await api('/admin/data'); }
+
+  const field = (label, input, hint = '') => `<div class="field"><label>${label}</label>${input}${hint ? `<small>${hint}</small>` : ''}</div>`;
+  const inp = (name, val, extra = '') => `<input name="${name}" value="${esc(val ?? '')}" ${extra}>`;
+  const sel = (name, opts, cur) => `<select name="${name}">${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  const check = (name, on, label) => `<label class="check"><input type="checkbox" name="${name}" ${on ? 'checked' : ''}> ${label}</label>`;
+  const addonRow = (a = {}) => `<div class="addon-row"><input data-f="name" placeholder="Add-on name" value="${esc(a.name || '')}">
+    <input data-f="price" inputmode="decimal" placeholder="0.00" value="${a.price_cents != null ? major(a.price_cents) : ''}">
+    <button type="button" data-act="admin-addon-del" title="Remove">✕</button></div>`;
+
+  function adminForm() {
+    const A = S.admin; const D = A.data; const s = A.sel;
+    if (!s) return `<div class="empty" style="padding:28px 20px">Select a row to edit it, or add a new one.</div>`;
+    const find = (list) => (s.id ? list.find((x) => x.id === s.id) : null);
+    let rec, body;
+    if (s.kind === 'item') {
+      rec = find(D.items) || { name: '', category_id: A.cat !== 'all' ? +A.cat : D.categories[0]?.id, station_id: D.stations[0]?.id, price_cents: 0, tags: [], has_spice: false, active: true, sort: 0, addons: [] };
+      body = field('Dish name', inp('name', rec.name, 'required maxlength="80"'))
+        + `<div class="two">${field('Category', sel('category_id', D.categories.map((c) => [c.id, c.name]), rec.category_id))}
+             ${field('Kitchen station', sel('station_id', D.stations.map((x) => [x.id, x.name]), rec.station_id))}</div>`
+        + `<div class="two">${field(`Price (${esc(S.cfg.currency.trim())})`, inp('price', major(rec.price_cents), 'inputmode="decimal" required'))}
+             ${field('Sort order', inp('sort', rec.sort, 'inputmode="numeric"'))}</div>`
+        + field('Tags', inp('tags', rec.tags.filter((t) => t !== 'Spice level').join(', '), 'placeholder="Wok, Veg"'), 'Comma separated. Shown under the dish name.')
+        + `<div class="field">${check('has_spice', rec.has_spice, 'Ask for spice level')}${check('active', rec.active, 'Show on menu')}</div>`
+        + `<div class="field"><label>Add-ons</label><div id="addons">${rec.addons.map(addonRow).join('')}</div>
+             <button type="button" class="link-red" data-act="admin-addon-add">+ Add add-on</button></div>`;
+    } else if (s.kind === 'category') {
+      rec = find(D.categories) || { name: '', default_course: 'main', sort: D.categories.length };
+      body = field('Category name', inp('name', rec.name, 'required maxlength="60"'))
+        + field('Fires as course', sel('default_course', D.courses.map((c) => [c, COURSE_LABEL[c]]), rec.default_course), 'Default course for dishes in this category.')
+        + field('Sort order', inp('sort', rec.sort, 'inputmode="numeric"'));
+    } else if (s.kind === 'area') {
+      rec = find(D.areas) || { name: '', short: '', sort: D.areas.length + 1 };
+      body = field('Area name', inp('name', rec.name, 'required maxlength="40"'))
+        + field('Short label', inp('short', rec.short, 'maxlength="20"'), 'Used on the Floor filter buttons.')
+        + field('Sort order', inp('sort', rec.sort, 'inputmode="numeric"'));
+    } else if (s.kind === 'table') {
+      rec = find(D.tables) || { code: '', area_id: D.areas[0]?.id, seats: 2, sort: D.tables.length, active: true };
+      body = `<div class="two">${field('Table code', inp('code', rec.code, 'required maxlength="10" placeholder="T9"'))}${field('Seats', inp('seats', rec.seats, 'inputmode="numeric" required'))}</div>`
+        + field('Area', sel('area_id', D.areas.map((a) => [a.id, a.name]), rec.area_id))
+        + field('Sort order', inp('sort', rec.sort, 'inputmode="numeric"'))
+        + `<div class="field">${check('active', rec.active, 'Show on floor')}</div>`
+        + (rec.busy ? '<div class="warn" style="margin:0">This table has an open order right now.</div>' : '');
+    } else if (s.kind === 'station') {
+      rec = find(D.stations) || { code: '', name: '', printer: '', sort: D.stations.length };
+      body = `<div class="two">${field('Code', inp('code', rec.code, 'required maxlength="12" placeholder="FRY"'))}${field('Name', inp('name', rec.name, 'required maxlength="30"'))}</div>`
+        + field('Printer label', inp('printer', rec.printer, 'maxlength="60"'), 'Shown at the bottom of each KOT.')
+        + field('Sort order', inp('sort', rec.sort, 'inputmode="numeric"'));
+    } else if (s.kind === 'staff') {
+      rec = find(D.staff) || { name: '', initials: '', role: 'Server', active: true };
+      body = `<div class="two">${field('Name', inp('name', rec.name, 'required maxlength="40"'))}${field('Initials', inp('initials', rec.initials, 'maxlength="3"'))}</div>`
+        + field('Role', sel('role', D.roles.map((r) => [r, r]), rec.role), 'Only Managers can open Admin.')
+        + field(s.id ? 'New PIN' : 'PIN', inp('pin', '', `inputmode="numeric" maxlength="8" autocomplete="off" ${s.id ? 'placeholder="Leave blank to keep"' : 'required'}`), '4–8 digits. Must be unique.')
+        + `<div class="field">${check('active', rec.active, 'Can sign in')}</div>`;
+    }
+    const canDelete = s.id && s.kind !== 'staff';
+    return `<form id="admin-form" autocomplete="off">
+      <div class="hd"><div class="eyebrow">${s.id ? 'Edit' : 'New'} ${ADMIN_NOUN[s.kind]}</div><h2>${esc(s.id ? rec.name || rec.code : `Add ${ADMIN_NOUN[s.kind]}`)}</h2></div>
+      <div class="form-body">${body}</div>
+      <div class="form-foot">
+        ${canDelete ? `<button type="button" class="btn" data-act="admin-delete">Delete</button>` : '<span></span>'}
+        <button type="button" class="btn" data-act="admin-cancel">Cancel</button>
+        <button type="submit" class="btn red">Save</button>
+      </div></form>`;
+  }
+
+  function adminList() {
+    const A = S.admin; const D = A.data;
+    const selRow = (kind, id) => (A.sel?.kind === kind && A.sel?.id === id ? 'sel' : '');
+    const head = (title, sub, kind, extra = '') => `<div class="page-head" style="border-bottom:0"><div><div class="eyebrow">Admin</div><h1 class="title">${title}</h1><div class="muted">${sub}</div></div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">${extra}<button type="button" class="btn dark" data-act="admin-new" data-kind="${kind}">+ Add ${ADMIN_NOUN[kind]}</button></div></div>`;
+    const catName = (id) => D.categories.find((c) => c.id === id)?.name || '—';
+    const stName = (id) => D.stations.find((c) => c.id === id)?.name || '—';
+    if (A.section === 'items') {
+      const q = A.q.trim().toLowerCase();
+      const list = D.items.filter((i) => (A.cat === 'all' || i.category_id === +A.cat) && (!q || i.name.toLowerCase().includes(q)));
+      return head('Menu items', `${D.items.filter((i) => i.active).length} on the menu · ${D.items.filter((i) => !i.active).length} hidden`, 'item',
+        `<input id="admin-q" class="admin-search" type="search" placeholder="Search dishes..." value="${esc(A.q)}">
+         <select id="admin-cat" class="admin-select"><option value="all">All categories</option>${D.categories.map((c) => `<option value="${c.id}" ${String(c.id) === A.cat ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)
+        + `<div class="htable-wrap"><table class="htable"><thead><tr><th>Dish</th><th>Category</th><th>Station</th><th>Add-ons</th><th>Status</th><th style="text-align:right">Price</th></tr></thead><tbody>
+          ${list.map((i) => `<tr class="${selRow('item', i.id)}" data-act="admin-sel" data-kind="item" data-id="${i.id}">
+            <td class="name"><b>${esc(i.name)}</b><div class="muted" style="font-size:12.5px">${i.tags.map(esc).join(' · ')}</div></td><td>${esc(catName(i.category_id))}</td><td>${esc(stName(i.station_id))}</td>
+            <td>${i.addons.length || '—'}</td><td><span class="s ${i.active ? 'paid' : 'void'}">${i.active ? 'On menu' : 'Hidden'}</span></td><td style="text-align:right"><b>${money(i.price_cents)}</b></td></tr>`).join('')
+            || '<tr><td colspan="6" class="muted">No dishes match.</td></tr>'}</tbody></table></div>`;
+    }
+    if (A.section === 'categories') {
+      return head('Categories', `${D.categories.length} categories · shown in sort order on the Order screen`, 'category')
+        + `<div class="htable-wrap"><table class="htable"><thead><tr><th>Sort</th><th>Category</th><th>Fires as</th><th>Dishes</th></tr></thead><tbody>
+          ${D.categories.map((c) => `<tr class="${selRow('category', c.id)}" data-act="admin-sel" data-kind="category" data-id="${c.id}">
+            <td>${c.sort}</td><td class="name"><b>${esc(c.name)}</b></td><td>${COURSE_LABEL[c.default_course]}</td><td>${c.item_count}</td></tr>`).join('')}</tbody></table></div>`;
+    }
+    if (A.section === 'floor') {
+      return head('Floor & tables', `${D.areas.length} areas · ${D.tables.filter((t) => t.active).length} tables on the floor`, 'table',
+        `<button type="button" class="btn" data-act="admin-new" data-kind="area">+ Add area</button>`)
+        + D.areas.map((a) => `<div class="area" style="padding-top:8px">
+            <h3 style="display:flex;align-items:baseline;gap:8px">${esc(a.name)}<small>${a.table_count} tables</small>
+              <button type="button" class="link-red" data-act="admin-sel" data-kind="area" data-id="${a.id}">Edit area</button></h3>
+            <div class="grid4">${D.tables.filter((t) => t.area_id === a.id).map((t) => `
+              <button type="button" class="tcard ${t.active ? 'free' : 'dining'} ${selRow('table', t.id) ? 'ordering' : ''}" style="min-height:96px" data-act="admin-sel" data-kind="table" data-id="${t.id}">
+                <div class="row1"><span class="code" style="font-size:24px">${esc(t.code)}</span><span class="seats">${t.seats} seats</span></div>
+                <span class="st">${t.active ? (t.busy ? 'Open order' : 'On floor') : 'Hidden'}</span></button>`).join('')}
+              <button type="button" class="tcard" style="min-height:96px;justify-content:center;color:var(--red-ink);font-weight:700" data-act="admin-new" data-kind="table" data-area="${a.id}">+ Add table</button>
+            </div></div>`).join('') + '<div style="height:28px"></div>';
+    }
+    if (A.section === 'stations') {
+      return head('Kitchen stations', 'Each station gets its own KOT and its own column filter on the Kitchen screen', 'station')
+        + `<div class="htable-wrap"><table class="htable"><thead><tr><th>Sort</th><th>Code</th><th>Station</th><th>Printer</th><th>Dishes</th></tr></thead><tbody>
+          ${D.stations.map((s) => `<tr class="${selRow('station', s.id)}" data-act="admin-sel" data-kind="station" data-id="${s.id}">
+            <td>${s.sort}</td><td><b>${esc(s.code)}</b></td><td class="name">${esc(s.name)}</td><td>${esc(s.printer)}</td><td>${s.item_count}</td></tr>`).join('')}</tbody></table></div>`;
+    }
+    return head('Staff', `${D.staff.filter((s) => s.active).length} active · sign in with a PIN`, 'staff')
+      + `<div class="htable-wrap"><table class="htable"><thead><tr><th></th><th>Name</th><th>Role</th><th>Status</th></tr></thead><tbody>
+        ${D.staff.map((s) => `<tr class="${selRow('staff', s.id)}" data-act="admin-sel" data-kind="staff" data-id="${s.id}">
+          <td style="width:52px"><span class="avatar" style="display:inline-grid">${esc(s.initials)}</span></td><td class="name"><b>${esc(s.name)}</b>${s.id === S.user.id ? ' <span class="muted">(you)</span>' : ''}</td>
+          <td>${esc(s.role)}</td><td><span class="s ${s.active ? 'paid' : 'void'}">${s.active ? 'Active' : 'Disabled'}</span></td></tr>`).join('')}</tbody></table></div>`;
+  }
+
+  function adminView() {
+    if (!isManager()) return '<section class="start"><h1 class="title">Managers only</h1><div class="muted">Sign in with a Manager PIN to open Admin.</div></section>';
+    if (!S.admin.data) return '<section class="hist"><div class="empty">Loading…</div></section>';
+    return `<section class="admin">
+      <aside class="cats scroll"><div class="label">ADMIN</div>
+        ${ADMIN_SECTIONS.map(([id, label]) => `<button type="button" class="cat ${S.admin.section === id ? 'on' : ''}" data-act="admin-section" data-id="${id}">${label}</button>`).join('')}
+      </aside>
+      <div class="scroll" id="admin-list">${adminList()}</div>
+      <aside class="hdetail scroll admin-form">${adminForm()}</aside>
+    </section>`;
+  }
+
+  function readAdminForm() {
+    const f = $('#admin-form');
+    const fd = new FormData(f);
+    const body = Object.fromEntries([...fd.entries()].filter(([k]) => !['has_spice', 'active'].includes(k)));
+    if (f.querySelector('[name="has_spice"]')) body.has_spice = fd.has('has_spice');
+    if (f.querySelector('[name="active"]')) body.active = fd.has('active');
+    if (S.admin.sel.kind === 'item') {
+      body.addons = [...f.querySelectorAll('.addon-row')].map((r) => ({ name: r.querySelector('[data-f="name"]').value, price: r.querySelector('[data-f="price"]').value || 0 }));
+    }
+    return body;
+  }
+  async function adminSave() {
+    const s = S.admin.sel;
+    const body = readAdminForm();
+    const path = `/admin/${ADMIN_PATH[s.kind]}${s.id ? '/' + s.id : ''}`;
+    await api(path, { method: s.id ? 'PATCH' : 'POST', body });
+    toast(`${s.id ? 'Saved' : 'Added'} ${body.name || body.code || ADMIN_NOUN[s.kind]}`);
+    await afterAdminChange(s.id ? s : null);
+  }
+  async function afterAdminChange(keepSel) {
+    await Promise.all([loadAdmin(), loadFloor(), api('/menu').then((m) => { S.menu = m; })]);
+    S.admin.sel = keepSel;
+    if (S.admin.sel?.kind === 'staff' && S.admin.sel.id === S.user.id) S.user = await api('/me');
+    render();
+  }
+
   // ---------- modals ----------
   function renderModal() {
     const m = S.modal;
@@ -531,6 +698,7 @@
     else if (S.tab === 'kitchen') view = kitchenView();
     else if (S.tab === 'bill') view = billView();
     else if (S.tab === 'history') view = historyView();
+    else if (S.tab === 'admin') view = adminView();
     // preserve focus/caret in search box across re-renders
     const active = document.activeElement?.id;
     const caret = active === 'search' ? document.activeElement.selectionStart : null;
@@ -560,6 +728,7 @@
     S.tab = tab;
     if (tab === 'kitchen') await loadKitchen();
     if (tab === 'history') await loadHistory();
+    if (tab === 'admin' && isManager()) await loadAdmin();
     if ((tab === 'order' || tab === 'bill') && S.order) await loadOrder();
     render();
   }
@@ -642,6 +811,22 @@
     },
     'hist-filter': (d) => { S.histFilter = d.v; render(); },
     'hist-sel': async (d) => { S.histSel = +d.id; S.histOrder = await api('/orders/' + d.id); render(); },
+    'admin-section': (d) => { S.admin.section = d.id; S.admin.sel = null; render(); },
+    'admin-sel': (d) => { S.admin.sel = { kind: d.kind, id: +d.id }; render(); },
+    'admin-new': (d) => {
+      S.admin.sel = { kind: d.kind, id: null }; render();
+      if (d.area) { const a = $('#admin-form [name="area_id"]'); if (a) a.value = d.area; }
+      $('#admin-form input')?.focus();
+    },
+    'admin-cancel': () => { S.admin.sel = null; render(); },
+    'admin-addon-add': () => { $('#addons').insertAdjacentHTML('beforeend', addonRow()); $('#addons .addon-row:last-child input').focus(); },
+    'admin-addon-del': (d, el) => el.closest('.addon-row').remove(),
+    'admin-delete': () => {
+      const s = S.admin.sel;
+      S.modal = { kind: 'confirm', title: `Delete this ${ADMIN_NOUN[s.kind]}?`, text: 'This cannot be undone.', yes: 'Delete',
+        run: async () => { S.modal = null; renderModal(); await api(`/admin/${ADMIN_PATH[s.kind]}/${s.id}`, { method: 'DELETE' }); toast('Deleted'); await afterAdminChange(null); } };
+      renderModal();
+    },
     'confirm-yes': () => S.modal.run(),
     'close-modal': () => { S.modal = null; renderModal(); },
     overlay: () => {},
@@ -653,9 +838,21 @@
     if (!el || el.disabled) return;
     if (el.dataset.act === 'overlay') { if (e.target === el) { S.modal = null; renderModal(); } return; }
     const fn = ACT[el.dataset.act];
-    if (fn) run(fn)(el.dataset);
+    if (fn) run(fn)(el.dataset, el);
+  });
+  document.addEventListener('submit', (e) => {
+    if (e.target.id === 'admin-form') { e.preventDefault(); run(adminSave)(); }
+  });
+  document.addEventListener('change', (e) => {
+    if (e.target.id === 'admin-cat') { S.admin.cat = e.target.value; $('#admin-list').innerHTML = adminList(); }
   });
   document.addEventListener('input', (e) => {
+    if (e.target.id === 'admin-q') {
+      S.admin.q = e.target.value;
+      const pos = e.target.selectionStart;
+      $('#admin-list').innerHTML = adminList();
+      const q = $('#admin-q'); q.focus(); q.setSelectionRange(pos, pos);
+    }
     if (e.target.id === 'search') {
       S.search = e.target.value;
       $('#dish-area').innerHTML = dishAreaHtml();
@@ -676,7 +873,7 @@
 
   // tick: clock every 15s, full re-render each minute for ages (skip while a modal or input is active)
   setInterval(() => { const c = $('#clock'); if (c && S.cfg) c.textContent = clock(Date.now()); }, 15000);
-  setInterval(() => { if (S.user && !S.modal && document.activeElement?.tagName !== 'INPUT') render(); }, 60000);
+  setInterval(() => { if (S.user && !S.modal && S.tab !== 'admin' && document.activeElement?.tagName !== 'INPUT') render(); }, 60000);
 
   // ---------- boot ----------
   async function boot() {

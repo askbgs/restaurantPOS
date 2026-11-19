@@ -134,3 +134,6 @@ CREATE TABLE IF NOT EXISTS order_items (
 CREATE INDEX IF NOT EXISTS order_items_order_idx ON order_items(order_id);
 CREATE INDEX IF NOT EXISTS kots_status_idx ON kots(status);
 CREATE INDEX IF NOT EXISTS orders_opened_idx ON orders(opened_at);
+
+-- v2: admin page
+ALTER TABLE dining_tables ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
