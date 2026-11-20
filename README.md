@@ -17,6 +17,8 @@ A restaurant point-of-sale and kitchen order ticket (KOT) system built from the 
 
 **Admin → Settings** also sets the **login screen background**: upload a photo of your restaurant, or keep the built-in one. It's resized to 1920 px, softly faded behind the PIN pad, and fades in when the screen opens.
 
+**Admin → Settings → Restaurant details on bills**: address (up to 3 lines), phone, email, website, VAT/business registration no. and a bill footer message. These print at the top of every bill, receipt and refund slip. **Restaurant logo**: upload once. It shows in the app header and on the login screen, and prints on bills: the browser converts it to a dithered black & white image sized for 58/80 mm thermal printers, with a preview of the printed result.
+
 **Admin → Settings** controls the restaurant name, terminal name, currency, tax and service charge, and the late-ticket time for every terminal. **Load Asian menu** replaces the menu with Short Eats, Sri Lankan, Indian, Chinese, Thai, Japanese, Korean, Desserts and Drinks. Dishes that appear on past orders are kept but hidden, so history stays correct.
 
 Other features:
@@ -38,7 +40,7 @@ Admin safeguards:
 ## Shifts, voids, reports and printing
 
 ### Shift & cash drawer (Shift tab)
-- Open a shift with the opening float. **Payments need an open shift**, so every sale is counted in a drawer.
+- Open a shift with the opening float. **New orders and payments need an open shift**, so every sale is counted in a drawer. With no shift open, the Floor and Order screens show an "Open shift" banner. Orders already open from an earlier shift can still be finished.
 - **Cash in / Cash out** (paid-outs) need a reason and Manager or Cashier approval.
 - The Shift tab shows live figures: sales, payments by method, refunds, voids and the cash that should be in the drawer.
 - **Close shift**: count the drawer, either by entering the total or with the Rs 5000 → Rs 1 note and coin counter. The app shows over, short or balanced, saves the result and prints the **Z report**. **Print X report** prints the figures so far without closing.
@@ -86,6 +88,7 @@ Admin safeguards:
    ```
    node print-bridge.js --server https://your-app.up.railway.app --token <token>
    ```
+   If you set up the bridge before the logo feature, download `print-bridge.js` again. The old bridge prints bills without the logo.
    The bridge holds an open connection and prints within about a second. Jobs are queued in Postgres, so nothing is lost if the PC is off; they print when the bridge reconnects. Failed jobs retry automatically and can be retried from the jobs list.
 
 What prints:

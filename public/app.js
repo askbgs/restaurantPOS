@@ -100,7 +100,7 @@
   function renderLogin(err = '') {
     modalEl.innerHTML = '';
     const box = `
-        <div class="hd"><div class="eyebrow">${esc(S.cfg?.terminal || '')}</div><h1>${esc(S.cfg?.restaurant || 'POS')}</h1>
+        <div class="hd">${S.cfg?.logo ? `<img class="login-logo" src="${esc(S.cfg.logo)}" alt="">` : ''}<div class="eyebrow">${esc(S.cfg?.terminal || '')}</div><h1>${esc(S.cfg?.restaurant || 'POS')}</h1>
           <div class="muted" style="margin-top:4px">Enter your staff PIN</div></div>
         <div class="pin-dots">${[0, 1, 2, 3].map((i) => `<i class="${i < pin.length ? 'f' : ''}"></i>`).join('')}${pin.length > 4 ? `<span>+${pin.length - 4}</span>` : ''}</div>
         <div class="login-err">${esc(err)}</div>
@@ -144,7 +144,7 @@
         <b>${title}</b><small>${esc(sub)}</small></button>`;
     return `
       <header class="topbar">
-        <div class="brand"><div class="logo">${esc((S.cfg.restaurant.match(/\b\w/g) || ['P']).slice(0, 2).join('').toUpperCase())}</div>
+        <div class="brand">${S.cfg.logo ? `<div class="logo has-img"><img src="${esc(S.cfg.logo)}" alt=""></div>` : `<div class="logo">${esc((S.cfg.restaurant.match(/\b\w/g) || ['P']).slice(0, 2).join('').toUpperCase())}</div>`}
           <div><b>${esc(S.cfg.restaurant)}</b><small>${esc(S.cfg.terminal)}</small></div></div>
         <nav class="tabs">
           ${tab('floor', 'Floor', `${f.seated ?? 0}/${f.tables ?? 0} tables`)}
@@ -181,6 +181,7 @@
     return `
       <section class="floor">
         <div class="floor-main scroll">
+          ${shiftBanner()}
           <div class="page-head">
             <div><div class="eyebrow">Dine-in</div><h1 class="title">Floor</h1>
               <div class="muted">${F.stats.seated} of ${F.stats.tables} tables seated · ${F.stats.covers} covers · ${F.stats.live_tickets} tickets in the kitchen</div></div>
@@ -229,7 +230,7 @@
       ['delivery', 'Address prints on the expo ticket.'],
       ['counter', 'Quick sale. Sends the KOT and goes straight to payment.'],
     ];
-    return `<section class="start scroll"><div class="eyebrow">New order</div><h1 class="title">Start an order</h1>
+    return `<section class="start scroll">${shiftBanner()}<div class="eyebrow">New order</div><h1 class="title">Start an order</h1>
       <div class="start-grid">${cards.map(([t, d]) => `<button type="button" data-act="new-order" data-type="${t}"><b>${TYPE_LABEL[t]}</b><span>${d}</span></button>`).join('')}</div></section>`;
   }
 
@@ -630,8 +631,26 @@
           <div class="two">${field('Tax label', inp('taxLabel', st.taxLabel, 'required maxlength="20"'))}
             ${field('Tax rate (%)', inp('taxRate', p(st.taxRate), 'inputmode="decimal"'))}</div>
           <div class="two">${field('Service charge (%)', inp('serviceRate', p(st.serviceRate), 'inputmode="decimal"'))}<div></div></div>
+          <h3 style="margin:18px 0 4px">Restaurant details on bills</h3>
+          <div class="muted" style="margin-bottom:12px">Printed at the top of every bill, receipt and refund slip, under the logo.</div>
+          <div class="two">${field('Address', `<textarea name="address" rows="3" maxlength="160" placeholder="No. 12, Main Street&#10;Trincomalee">${esc(st.address)}</textarea>`, 'Up to 3 lines.')}
+            <div>${field('Phone', inp('phone', st.phone, 'maxlength="60" placeholder="+94 26 222 3344"'))}${field('Email', inp('email', st.email, 'maxlength="80" type="email"'))}</div></div>
+          <div class="two">${field('Website', inp('website', st.website, 'maxlength="80" placeholder="www.example.lk"'))}
+            ${field('VAT / business reg. no.', inp('regNo', st.regNo, 'maxlength="60"'), 'Printed as "Reg. No".')}</div>
+          ${field('Bill footer message', inp('billFooter', st.billFooter, 'maxlength="120" placeholder="Thank you! Come again."'))}
           <button type="submit" class="btn red" style="min-width:200px;text-align:center">Save settings</button>
         </form>
+        <div class="settings-form" style="margin-top:8px;border-top:1px solid var(--line);padding-top:22px">
+          <h3 style="margin:0 0 6px">Restaurant logo</h3>
+          <div class="muted" style="margin-bottom:12px">Shown in the header and on the login screen, and printed at the top of bills. A simple dark logo on a white or transparent background prints best on thermal printers.</div>
+          <div class="img-edit" style="margin-bottom:10px">
+            <div class="img-box logo-box">${S.cfg.logo ? `<img src="${esc(S.cfg.logo)}" alt="">` : '<span>No logo</span>'}</div>
+            <div class="img-box logo-box print-prev" title="How it prints on a thermal printer">${S.admin.logoPreview ? `<img src="${S.admin.logoPreview}" alt="">` : S.cfg.logo ? `<img class="mono" src="${esc(S.cfg.logo)}" alt="">` : '<span>Print preview</span>'}</div>
+            <div class="img-actions"><label class="btn" style="cursor:pointer">${S.cfg.logo ? 'Change logo' : 'Upload logo'}<input type="file" id="logo-file" accept="image/*" hidden></label>
+              ${S.cfg.logo ? '<button type="button" class="link-red" data-act="logo-remove">Remove logo</button>' : ''}
+              <small class="muted">Left: on screen. Right: on the printer (black & white).</small></div></div>
+          <div class="bill-preview">${billHeaderHtml(st)}<div class="c muted" style="margin-top:6px">… bill items …</div>${st.billFooter ? `<div class="c" style="margin-top:6px">${esc(st.billFooter)}</div>` : ''}</div>
+        </div>
         <div class="settings-form" style="margin-top:8px;border-top:1px solid var(--line);padding-top:22px">
           <h3 style="margin:0 0 6px">Login screen background</h3>
           <div class="muted" style="margin-bottom:12px">A photo of your restaurant behind the PIN pad. It's resized to 1920 px and faded slightly so the keypad stays easy to read.</div>
@@ -794,7 +813,7 @@
     const P = $('#print'); const sh = sum.shift;
     const r = (a, b) => `<div class="r"><span>${a}</span><span>${b}</span></div>`;
     const v = sh.counted_cents != null ? sh.counted_cents - sum.expected_cents : null;
-    P.innerHTML = `<h3>${esc(S.cfg.restaurant)}</h3><div class="c">${sh.status === 'closed' ? 'Z REPORT · SHIFT CLOSE' : 'X REPORT · SHIFT SO FAR'}</div><hr>
+    P.innerHTML = `${S.cfg.logo ? `<div class="c"><img class="bill-logo" src="${esc(S.cfg.logo)}" alt=""></div>` : ''}<h3>${esc(S.cfg.restaurant)}</h3><div class="c">${sh.status === 'closed' ? 'Z REPORT · SHIFT CLOSE' : 'X REPORT · SHIFT SO FAR'}</div><hr>
       ${r('Shift', '#' + sh.id)}${r('Opened', clock(sh.opened_at) + ' · ' + esc(sh.opened_by_name || ''))}${sh.closed_at ? r('Closed', clock(sh.closed_at) + ' · ' + esc(sh.closed_by_name || '')) : ''}<hr>
       ${r('Orders paid', sum.sales.orders)}${r('Gross sales', money(sum.sales.gross_cents))}${r('Discounts', '-' + money(sum.sales.discount_cents))}
       ${r('Service', money(sum.sales.service_cents))}${r(esc(S.cfg.taxLabel), money(sum.sales.tax_cents))}${r('Tips', money(sum.sales.tip_cents))}
@@ -1400,11 +1419,56 @@
     return [...groups.values()];
   }
 
+  // Header for browser-printed bills (and the preview in Settings)
+  function billHeaderHtml(c = S.cfg) {
+    const lines = String(c.address || '').split('\n').filter(Boolean);
+    return `${S.cfg.logo ? `<div class="c"><img class="bill-logo" src="${esc(S.cfg.logo)}" alt=""></div>` : ''}
+      <h3>${esc(c.restaurant)}</h3>${lines.map((l) => `<div class="c">${esc(l)}</div>`).join('')}
+      ${c.phone ? `<div class="c">Tel: ${esc(c.phone)}</div>` : ''}${c.email || c.website ? `<div class="c">${[c.email, c.website].filter(Boolean).map(esc).join(' · ')}</div>` : ''}
+      ${c.regNo ? `<div class="c">Reg. No: ${esc(c.regNo)}</div>` : ''}${c.terminal ? `<div class="c">${esc(c.terminal)}</div>` : ''}`;
+  }
+  // Turn an uploaded logo into (1) a PNG for the screen and (2) a dithered 1-bit raster for thermal printers.
+  async function processLogo(file) {
+    if (!file.type.startsWith('image/')) throw new Error('Choose an image file');
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => { throw new Error('Could not read that image'); });
+    // screen copy: max 600 px, PNG keeps transparency
+    const k1 = Math.min(1, 600 / Math.max(bmp.width, bmp.height));
+    const c1 = document.createElement('canvas'); c1.width = Math.round(bmp.width * k1); c1.height = Math.round(bmp.height * k1);
+    c1.getContext('2d').drawImage(bmp, 0, 0, c1.width, c1.height);
+    const image = c1.toDataURL('image/png');
+    // print copy: fits 384 × 160 dots (works on 58 mm and 80 mm), width a multiple of 8
+    const k2 = Math.min(384 / bmp.width, 160 / bmp.height, 1.5);
+    const w = Math.max(8, Math.round((bmp.width * k2) / 8) * 8); const h = Math.max(1, Math.round(bmp.height * k2));
+    const c2 = document.createElement('canvas'); c2.width = w; c2.height = h;
+    const g = c2.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); g.drawImage(bmp, 0, 0, w, h);
+    const px = g.getImageData(0, 0, w, h);
+    const lum = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) lum[i] = 0.299 * px.data[i * 4] + 0.587 * px.data[i * 4 + 1] + 0.114 * px.data[i * 4 + 2];
+    const bits = new Uint8Array((w / 8) * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) { // Floyd–Steinberg dithering
+        const i = y * w + x; const old = lum[i]; const black = old < 128; const err = old - (black ? 0 : 255);
+        if (black) bits[y * (w / 8) + (x >> 3)] |= 0x80 >> (x & 7);
+        if (x + 1 < w) lum[i + 1] += err * 7 / 16;
+        if (y + 1 < h) { if (x > 0) lum[i + w - 1] += err * 3 / 16; lum[i + w] += err * 5 / 16; if (x + 1 < w) lum[i + w + 1] += err / 16; }
+      }
+    }
+    // preview of the printed result
+    const out = g.createImageData(w, h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const on = bits[y * (w / 8) + (x >> 3)] & (0x80 >> (x & 7)); const j = (y * w + x) * 4;
+      out.data[j] = out.data[j + 1] = out.data[j + 2] = on ? 0 : 255; out.data[j + 3] = 255;
+    }
+    g.putImageData(out, 0, 0);
+    let bin = ''; for (const b of bits) bin += String.fromCharCode(b);
+    return { image, raster: { w, h, data: btoa(bin) }, preview: c2.toDataURL('image/png') };
+  }
+
   // ---------- print ----------
   function printBill(o) {
     const P = $('#print');
     const r = (a, b) => `<div class="r"><span>${a}</span><span>${b}</span></div>`;
-    P.innerHTML = `<h3>${esc(S.cfg.restaurant)}</h3><div class="c">${esc(S.cfg.terminal)}</div><hr>
+    P.innerHTML = `${billHeaderHtml()}<hr>
       <div>${esc(orderTitle(o))} · Order #${o.order_no}</div><div>${new Date().toLocaleString('en-GB', { timeZone: S.cfg.timezone })}</div>
       <div>Server: ${esc(o.staff_name || '')}${o.type === 'dinein' ? ` · Guests: ${o.guests}` : ''}</div><hr>
       ${o.items.filter((i) => eq(i) > 0).map((i) => r(`${eq(i)} x ${esc(i.name)}`, money(lineTotal(i)))).join('')}<hr>
@@ -1415,7 +1479,7 @@
       ${o.tip_cents ? r(`Tip ${o.tip_pct}%`, money(o.tip_cents)) : ''}<hr>
       <b>${r('TOTAL', money(o.total_cents))}</b>
       ${o.split_ways > 1 ? r(`Per person (${o.split_ways})`, money(Math.ceil(o.total_cents / o.split_ways))) : ''}
-      <hr><div class="c">Thank you!</div>`;
+      <hr>${S.cfg.billFooter ? `<div class="c">${esc(S.cfg.billFooter)}</div>` : ''}`;
     window.print();
   }
 
@@ -1451,6 +1515,18 @@
     render();
   }
 
+  // Orders can only start while a shift is open
+  function needShift() {
+    if (S.shift?.shift) return false;
+    S.modal = { kind: 'confirm', title: 'Open a shift first',
+      text: 'New orders can only be started while a shift is open, so every sale is counted in a cash drawer. Open the shift with the opening float, then take orders.',
+      yes: 'Go to Shift', run: async () => { S.modal = null; await setTab('shift'); } };
+    renderModal();
+    return true;
+  }
+  const shiftBanner = () => (S.shift && !S.shift.shift ? `<div class="shift-banner"><span><b>No shift is open.</b> Open a shift to start taking orders.</span>
+    <button type="button" class="btn red" data-act="tab" data-tab="shift">Open shift</button></div>` : '');
+
   async function createOrder(body) {
     const o = await api('/orders', { body });
     S.order = o; S.tab = 'order'; S.search = ''; S.modal = null;
@@ -1480,10 +1556,12 @@
     table: async (d) => {
       const t = S.floor.areas.flatMap((a) => a.tables).find((x) => String(x.id) === d.id);
       if (t.order) return openOrder(t.order.id);
+      if (needShift()) return;
       return createOrder({ type: 'dinein', table_id: t.id, guests: Math.min(2, t.seats) });
     },
     'new-order': (d) => {
       if (d.type === 'dinein') { S.tab = 'floor'; return render(); }
+      if (needShift()) return;
       if (d.type === 'counter') return createOrder({ type: 'counter' });
       S.modal = { kind: 'customer', type: d.type }; renderModal();
     },
@@ -1603,6 +1681,10 @@
           await afterAdminChange(null);
         } };
       renderModal();
+    },
+    'logo-remove': async () => {
+      await api('/admin/logo', { method: 'DELETE' }); S.admin.logoPreview = null;
+      S.cfg = await fetch('/api/config').then((x) => x.json()); toast('Logo removed'); render();
     },
     'login-bg-reset': async () => {
       await api('/admin/login-bg', { method: 'DELETE' });
@@ -1844,6 +1926,17 @@
     }
   });
   document.addEventListener('change', (e) => {
+    if (e.target.id === 'logo-file' && e.target.files[0]) {
+      run(async () => {
+        const out = await processLogo(e.target.files[0]);
+        const res = await fetch('/api/admin/logo', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+          body: JSON.stringify({ image: out.image, raster: out.raster }) });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Upload failed');
+        S.admin.logoPreview = out.preview;
+        S.cfg = await fetch('/api/config').then((x) => x.json());
+        toast('Logo saved'); await loadAdmin(); render();
+      })();
+    }
     if (e.target.closest('#rec-rows')) updateRecipeTotal();
     if (e.target.closest('#pur-rows') && e.target.tagName === 'SELECT') updatePurchaseTotal(e.target);
     if (e.target.id === 'login-bg-file' && e.target.files[0]) {

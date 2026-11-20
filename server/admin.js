@@ -35,8 +35,9 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
       const label = b.name || b.code || '';
       let summary;
       if (parts[0] === 'sample-menu') summary = 'Loaded the Asian sample menu';
+      else if (parts[0] === 'logo') summary = req.method === 'DELETE' ? 'Restaurant logo removed' : 'Restaurant logo uploaded';
       else if (parts[0] === 'login-bg') summary = req.method === 'DELETE' ? 'Login background reset to default' : 'Login background photo uploaded';
-      else if (parts[0] === 'settings') summary = `Settings changed (terminal "${b.terminal}", tax ${b.taxRate}%, service ${b.serviceRate}%)`;
+      else if (parts[0] === 'settings') summary = `Settings changed (name "${b.restaurant}", terminal "${b.terminal}", tax ${b.taxRate}%, service ${b.serviceRate}%)`;
       else if (parts[0] === 'printing') {
         const sub = parts[1];
         summary = sub === 'routing' ? 'Printer routing changed'
@@ -50,7 +51,7 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
         summary = `${what[0].toUpperCase()}${what.slice(1)} ${label || (parts[1] ? '#' + parts[1] : '')} ${verb}`.replace(/\s+/g, ' ');
       }
       if (parts[0] === 'staff' && b.pin) summary += ' (PIN changed)';
-      const details = Object.fromEntries(Object.entries(b).filter(([k]) => !/pin|token/i.test(k)).slice(0, 20));
+      const details = Object.fromEntries(Object.entries(b).filter(([k]) => !/pin|token|image|raster/i.test(k)).slice(0, 20));
       audit(pool, { action: `admin.${parts[0] || 'change'}`, staffId: req.user.id, summary, details }).catch(() => {});
     });
     next();
@@ -81,7 +82,8 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     res.json({ categories: categories.rows, items: items.rows, areas: areas.rows, tables: tables.rows,
       stations: stations.rows, staff: staff.rows, roles: ROLES, courses: COURSES,
       settings: { restaurant: CONFIG.restaurant, terminal: CONFIG.terminal, currency: CONFIG.currency, taxLabel: CONFIG.taxLabel,
-        taxRate: CONFIG.taxRate, serviceRate: CONFIG.serviceRate, lateMinutes: CONFIG.lateMinutes } });
+        taxRate: CONFIG.taxRate, serviceRate: CONFIG.serviceRate, lateMinutes: CONFIG.lateMinutes,
+        address: CONFIG.address, phone: CONFIG.phone, email: CONFIG.email, website: CONFIG.website, regNo: CONFIG.regNo, billFooter: CONFIG.billFooter } });
   }));
 
   const done = (res, kind = 'menu') => { notify(kind); res.json({ ok: true }); };
@@ -98,12 +100,42 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
       taxRate: pctIn(b.taxRate, 'Tax rate'),
       serviceRate: pctIn(b.serviceRate, 'Service charge'),
       lateMinutes: String(Math.min(120, Math.max(1, int(b.lateMinutes, 12)))),
+      address: String(b.address ?? '').replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 3).join('\n').slice(0, 160),
+      phone: str(b.phone, 60), email: str(b.email, 80), website: str(b.website, 80), regNo: str(b.regNo, 60),
+      billFooter: str(b.billFooter, 120),
     };
     await tx(async (c) => {
       for (const [k, v] of Object.entries(vals)) {
         await c.query('INSERT INTO settings(key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [k, v]);
       }
     });
+    await loadSettings();
+    done(res, 'settings');
+  }));
+
+  // Restaurant logo: the display image plus a 1-bit raster (made in the browser) for thermal printers
+  r.put('/logo', express.json({ limit: '3mb' }), wrap(async (req, res) => {
+    const m = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(String(req.body.image || ''));
+    if (!m) bad('Upload a PNG, JPEG or WebP image');
+    const data = Buffer.from(m[2], 'base64');
+    if (data.length > 2 * 1024 * 1024) bad('Logo image is too large');
+    const rs = req.body.raster || {};
+    const w = int(rs.w); const h = int(rs.h);
+    if (!w || !h || w > 576 || h > 400 || w % 8) bad('Bad print image');
+    const bits = Buffer.from(String(rs.data || ''), 'base64');
+    if (bits.length !== (w / 8) * h) bad('Bad print image');
+    await tx(async (c) => {
+      await c.query(`INSERT INTO app_images(key, mime, data) VALUES ('logo', $1, $2)
+                     ON CONFLICT (key) DO UPDATE SET mime=EXCLUDED.mime, data=EXCLUDED.data, updated_at=now()`, [m[1], data]);
+      await c.query(`INSERT INTO settings(key, value) VALUES ('logoRaster', $1) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`,
+        [JSON.stringify({ w, h, data: bits.toString('base64') })]);
+    });
+    await loadSettings();
+    done(res, 'settings');
+  }));
+  r.delete('/logo', wrap(async (req, res) => {
+    await pool.query("DELETE FROM app_images WHERE key='logo'");
+    await pool.query("DELETE FROM settings WHERE key='logoRaster'");
     await loadSettings();
     done(res, 'settings');
   }));

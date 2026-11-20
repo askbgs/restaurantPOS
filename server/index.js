@@ -16,6 +16,9 @@ const CONFIG = {
   serviceRate: Number(process.env.SERVICE_RATE ?? 0.10),  // fraction
   lateMinutes: Number(process.env.LATE_MINUTES ?? 12),
   timezone: process.env.TZ_DISPLAY || 'Asia/Colombo',
+  // business details printed on bills (set in Admin → Settings)
+  address: '', phone: '', email: '', website: '', regNo: '', billFooter: 'Thank you! Come again.',
+  logoRaster: null, // 1-bit logo for thermal printers: { w, h, data (base64, packed rows) }
 };
 const ENV_CONFIG = { ...CONFIG };
 const NUMERIC = ['taxRate', 'serviceRate', 'lateMinutes'];
@@ -26,6 +29,7 @@ async function loadSettings() {
   Object.assign(CONFIG, ENV_CONFIG);
   for (const { key, value } of rows) {
     if (!(key in ENV_CONFIG) || key === 'timezone') continue;
+    if (key === 'logoRaster') { try { CONFIG.logoRaster = JSON.parse(value); } catch { CONFIG.logoRaster = null; } continue; }
     CONFIG[key] = NUMERIC.includes(key) ? Number(value) : value;
   }
 }
@@ -33,7 +37,8 @@ listeners.add((kind) => { if (kind === 'settings') loadSettings().catch((e) => c
 
 const app = express();
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '200kb' }));
+const jsonBody = express.json({ limit: '200kb' });
+app.use((req, res, next) => (req.path === '/api/admin/logo' ? next() : jsonBody(req, res, next))); // the logo route parses its own larger body
 
 // ---------- helpers ----------
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -143,8 +148,18 @@ app.use('/bridge', printing.bridge);
 
 // ---------- auth ----------
 app.get('/api/config', wrap(async (req, res) => {
-  const { rows: [bg] } = await pool.query("SELECT extract(epoch FROM updated_at)::bigint AS v FROM app_images WHERE key='login_bg'");
-  res.json({ ...CONFIG, loginBg: bg ? `/login-bg?v=${bg.v}` : '/img/login-bg.jpg' });
+  const { rows } = await pool.query("SELECT key, extract(epoch FROM updated_at)::bigint AS v FROM app_images WHERE key IN ('login_bg','logo')");
+  const ver = Object.fromEntries(rows.map((r) => [r.key, r.v]));
+  const { logoRaster, ...pub } = CONFIG;
+  res.json({ ...pub, loginBg: ver.login_bg ? `/login-bg?v=${ver.login_bg}` : '/img/login-bg.jpg', logo: ver.logo ? `/logo?v=${ver.logo}` : null });
+}));
+
+// Restaurant logo (public: shown on the login screen and printed bills)
+app.get('/logo', wrap(async (req, res) => {
+  const { rows: [img] } = await pool.query("SELECT mime, data FROM app_images WHERE key='logo'");
+  if (!img) return res.status(404).end();
+  res.set({ 'Content-Type': img.mime, 'Cache-Control': req.query.v ? 'public, max-age=31536000, immutable' : 'no-cache', 'X-Content-Type-Options': 'nosniff' });
+  res.send(img.data);
 }));
 
 // Login background: the uploaded photo, or the built-in one. Public, because it shows before sign-in.
@@ -258,6 +273,7 @@ app.get('/api/floor', wrap(async (req, res) => {
 app.post('/api/orders', wrap(async (req, res) => {
   const { type } = req.body;
   if (!['dinein', 'takeaway', 'delivery', 'counter'].includes(type)) bad('Unknown order type');
+  if (!(await openShift(pool))) throw new HttpError(409, 'No shift is open. Open a shift before starting orders.');
   const tableId = int(req.body.table_id);
   if (type === 'dinein' && !tableId) bad('Pick a table');
   if (type === 'takeaway' && !req.body.customer_name) bad('Customer name is required');

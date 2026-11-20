@@ -41,6 +41,19 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
   }
 
   // ---------- documents ----------
+  // Logo, name, address, contact and registration no. at the top of every customer-facing slip
+  function brandHeader({ terminal = true } = {}) {
+    const d = [];
+    if (CONFIG.logoRaster) d.push({ t: 'image', w: CONFIG.logoRaster.w, h: CONFIG.logoRaster.h, data: CONFIG.logoRaster.data, align: 'center' });
+    d.push({ t: 'text', s: CONFIG.restaurant, align: 'center', bold: true, size: 2 });
+    for (const line of String(CONFIG.address || '').split('\n').filter(Boolean)) d.push({ t: 'text', s: line, align: 'center' });
+    if (CONFIG.phone) d.push({ t: 'text', s: `Tel: ${CONFIG.phone}`, align: 'center' });
+    const web = [CONFIG.email, CONFIG.website].filter(Boolean).join(' · ');
+    if (web) d.push({ t: 'text', s: web, align: 'center' });
+    if (CONFIG.regNo) d.push({ t: 'text', s: `Reg. No: ${CONFIG.regNo}`, align: 'center' });
+    if (terminal && CONFIG.terminal) d.push({ t: 'text', s: CONFIG.terminal, align: 'center' });
+    return d;
+  }
   const mods = (i) => [i.spice, ...(i.addons || []).map((a) => '+ ' + a.name)].filter(Boolean).join(', ');
 
   function kotDoc({ kot, order, items, staffName, flag }) {
@@ -77,10 +90,7 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
   }
 
   function billDoc(o, { label = 'BILL', refunds = [] } = {}) {
-    const d = [
-      { t: 'text', s: CONFIG.restaurant, align: 'center', bold: true, size: 2 },
-      { t: 'text', s: CONFIG.terminal, align: 'center' },
-    ];
+    const d = brandHeader();
     if (label !== 'BILL') d.push({ t: 'text', s: `*** ${label} ***`, align: 'center', bold: true });
     d.push({ t: 'hr' },
       { t: 'row', l: title(o), r: `#${o.order_no}`, bold: true },
@@ -103,13 +113,15 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
     if (o.split_ways > 1) d.push({ t: 'row', l: `Per person (${o.split_ways})`, r: money(Math.ceil(o.total_cents / o.split_ways)) });
     if (o.status === 'paid') d.push({ t: 'row', l: 'Paid by', r: (o.payment_method || '').toUpperCase() });
     for (const r of refunds) d.push({ t: 'row', l: `Refund (${r.method})`, r: '-' + money(r.amount_cents) });
-    d.push({ t: 'hr' }, { t: 'text', s: 'Thank you! Come again.', align: 'center' }, { t: 'feed', n: 3 }, { t: 'cut' });
+    d.push({ t: 'hr' });
+    if (CONFIG.billFooter) d.push({ t: 'text', s: CONFIG.billFooter, align: 'center' });
+    d.push({ t: 'feed', n: 3 }, { t: 'cut' });
     return d;
   }
 
   function refundDoc({ order, amount, method, reason, staffName, approverName }) {
     return [
-      { t: 'text', s: CONFIG.restaurant, align: 'center', bold: true, size: 2 },
+      ...brandHeader({ terminal: false }),
       { t: 'text', s: '*** REFUND ***', align: 'center', bold: true, size: 2 },
       { t: 'hr' },
       { t: 'row', l: title(order), r: `#${order.order_no}`, bold: true },

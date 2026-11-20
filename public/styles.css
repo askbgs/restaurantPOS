@@ -316,6 +316,25 @@ label.check input { width: 20px; height: 20px; accent-color: var(--ink); }
 .dish-cell { display: flex; gap: 12px; align-items: center; }
 .dish-cell img, .dish-cell .noimg { width: 52px; height: 36px; object-fit: cover; border: 1px solid var(--soft); flex: none; background: #e9e8e6; }
 
+/* ---------- shift required / logo / bill details ---------- */
+.shift-banner { display: flex; justify-content: space-between; align-items: center; gap: 14px; background: var(--red-pale); border-bottom: 2px solid var(--red); padding: 12px 28px; color: var(--red-ink); }
+.start .shift-banner { margin: -40px -40px 28px; }
+.shift-banner .btn { padding: 9px 16px; font-size: 14px; }
+.brand .logo.has-img { background: #fff; border: 1px solid var(--soft); overflow: hidden; }
+.brand .logo.has-img img { width: 100%; height: 100%; object-fit: contain; }
+.login-logo { display: block; max-height: 64px; max-width: 200px; object-fit: contain; margin-bottom: 12px; }
+.logo-box { width: 160px; background: #fff; }
+.logo-box img { object-fit: contain !important; padding: 6px; }
+.logo-box img.mono { filter: grayscale(1) contrast(1.6); }
+.print-prev { border-style: dashed; }
+.print-prev img { image-rendering: pixelated; }
+.settings-form textarea { width: 100%; padding: 10px 12px; border: 2px solid #9a9a9a; background: #fff; font: inherit; font-size: 15px; outline: none; resize: vertical; }
+.settings-form textarea:focus { border-color: var(--ink); }
+.bill-preview { width: 300px; background: #fff; border: 1px solid var(--soft); padding: 16px 14px; font-family: 'Courier New', monospace; font-size: 12px; box-shadow: 0 6px 20px rgba(0,0,0,.08); }
+.bill-preview h3 { text-align: center; margin: 4px 0; font-size: 16px; }
+.bill-preview .c, #print .c { text-align: center; }
+.bill-logo { max-width: 60%; max-height: 90px; object-fit: contain; filter: grayscale(1); }
+
 /* ---------- stock ---------- */
 .stk { display: inline-block; font-size: 11.5px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; padding: 2px 7px; border: 1px solid currentColor; }
 .stk.ok { color: var(--muted); border-color: var(--soft); }

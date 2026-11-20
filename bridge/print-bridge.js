@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Restaurant POS — print bridge
+ * Restaurant POS — print bridge (v2: prints the restaurant logo)
  * Runs on a PC in the restaurant, collects print jobs from the POS server and sends them to
  * ESC/POS thermal printers (Xprinter, Epson TM, Rongta, etc.). No npm install needed (Node 18+).
  *
@@ -72,6 +72,17 @@ function render(doc, width) {
         for (const line of wrap(left, w)) { str(line); push(0x0a); }
         str(' '.repeat(Math.max(0, w - right.length)) + right); push(0x0a);
       }
+    } else if (l.t === 'image') {
+      // 1-bit raster logo (GS v 0), sent in 64-row strips so small printer buffers don't overflow
+      const bytesPerRow = l.w / 8;
+      const bits = Buffer.from(l.data, 'base64');
+      for (let y = 0; y < l.h; y += 64) {
+        const rows = Math.min(64, l.h - y);
+        push(GS, 0x76, 0x30, 0x00, bytesPerRow & 0xff, (bytesPerRow >> 8) & 0xff, rows & 0xff, (rows >> 8) & 0xff);
+        const chunk = bits.subarray(y * bytesPerRow, (y + rows) * bytesPerRow);
+        for (const b of chunk) bytes.push(b);
+      }
+      push(0x0a);
     } else if (l.t === 'hr') {
       str('-'.repeat(width)); push(0x0a);
     } else if (l.t === 'feed') {
