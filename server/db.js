@@ -2,6 +2,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { Pool, Client } = require('pg');
+// NUMERIC (stock quantities, unit costs) as JS numbers rather than strings
+require('pg').types.setTypeParser(1700, (v) => (v === null ? null : parseFloat(v)));
+// DATE columns as plain 'YYYY-MM-DD' strings (no time-zone shifting)
+require('pg').types.setTypeParser(1082, (v) => v);
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {

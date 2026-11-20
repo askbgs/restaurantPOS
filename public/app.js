@@ -12,6 +12,7 @@
     admin: { section: 'items', data: null, sel: null, cat: 'all', q: '', printing: null, audit: null, auditFilter: '' },
     shift: null, shifts: [], shiftSel: null, shiftDetail: null,
     rep: { preset: 'today', from: '', to: '', data: null },
+    inv: { section: 'stock', data: null, recipes: null, purchases: null, reorder: null, sel: null, filter: 'all', rfilter: 'all', q: '', moves: null, supDetail: null, purDetail: null },
     payMethod: 'card', modal: null, live: false,
   };
   const COURSES = ['drink', 'starter', 'main', 'dessert'];
@@ -75,7 +76,7 @@
     if (S.tab === 'history') jobs.push(loadHistory());
     await Promise.all(jobs);
     if (S.tab === 'shift') await loadShift();
-    if (S.tab === 'admin' || S.tab === 'reports') { const h = $('header.topbar'); if (h) h.outerHTML = header(); return; }
+    if (['admin', 'reports', 'stock'].includes(S.tab)) { const h = $('header.topbar'); if (h) h.outerHTML = header(); return; }
     render();
   }
 
@@ -86,7 +87,7 @@
     const es = new EventSource('/api/events');
     es.onopen = () => { S.live = true; updateLiveDot(); };
     es.onmessage = (e) => {
-      if (e.data === 'menu') api('/menu').then((m) => { S.menu = m; }).catch(() => {});
+      if (e.data === 'menu' || e.data === 'stock') api('/menu').then((m) => { S.menu = m; if (S.tab === 'order' && $('#dish-area')) $('#dish-area').innerHTML = dishAreaHtml(); }).catch(() => {});
       if (e.data === 'settings') fetch('/api/config').then((x) => x.json()).then((c) => { S.cfg = c; document.title = `${c.restaurant} · POS`; scheduleRefresh(); }).catch(() => {});
       scheduleRefresh();
     };
@@ -152,6 +153,7 @@
           ${tab('bill', 'Bill', o ? money(o.total_cents) : 'No order', !o)}
           ${tab('history', 'History', `${f.closed_today ?? 0} closed`)}
           ${tab('shift', 'Shift', S.shift?.shift ? `#${S.shift.shift.id} open` : 'Not open')}
+          ${isManager() ? tab('stock', 'Stock', f.stock_alerts ? `${f.stock_alerts} to reorder` : 'Ingredients') : ''}
           ${isManager() ? tab('reports', 'Reports', 'Sales') : ''}
           ${isManager() ? tab('admin', 'Admin', 'Menu & staff') : ''}
         </nav>
@@ -248,7 +250,8 @@
         <div class="dish">
           <button type="button" class="add" data-act="quick-add" data-id="${i.id}">
             ${i.image_ver ? `<img class="dish-img" src="/menu-img/${i.id}?v=${i.image_ver}" alt="" loading="lazy">` : ''}
-            <span class="n">${esc(i.name)}</span><span class="tags">${i.tags.map(esc).join(' · ')}${i.no_kot ? `${i.tags.length ? ' · ' : ''}<b class="ready-tag">Ready · no KOT</b>` : ''}</span><span class="p">${money(i.price_cents)}</span>
+            <span class="n">${esc(i.name)}</span><span class="tags">${i.tags.map(esc).join(' · ')}${i.no_kot ? `${i.tags.length ? ' · ' : ''}<b class="ready-tag">Ready · no KOT</b>` : ''}</span>
+            ${i.stock_out ? '<span class="stk out" style="align-self:flex-start">Low on ingredients</span>' : ''}<span class="p">${money(i.price_cents)}</span>
           </button>
           <button type="button" class="opt" data-act="options" data-id="${i.id}">Options</button>
         </div>`).join('') || '<div class="empty">No dishes found.</div>'}</div>`;
@@ -880,6 +883,15 @@
         <div class="rep-card"><h3>Busy hours <small class="muted">by order start time</small></h3>${hours.length
           ? barChart(hours.map((h) => ({ v: h.cents, label: `${h.hour}:00–${h.hour + 1}:00`, tick: `${(h.hour % 12) || 12}${h.hour < 12 ? 'a' : 'p'}`, extra: `${h.orders} orders` })), { label: 'Sales by hour', height: 150 })
           : '<div class="muted">No sales in this period.</div>'}</div>
+        ${d.stock.has_recipes ? `<div class="rep-card"><h3>Food cost & stock <small class="muted">ingredients valued at average cost when used</small></h3>
+          <div class="kpis inner">
+            ${kpi('Food & drink sales', money(d.stock.food_sales_cents), 'after discounts, before service & tax')}
+            ${kpi('Cost of ingredients', money(d.stock.cogs_cents), 'from recipes of what was sold')}
+            ${kpi('Food cost', d.stock.food_cost_pct === null ? '—' : d.stock.food_cost_pct + '%', 'target is usually 28–35%')}
+            ${kpi('Gross profit', money(d.stock.gross_profit_cents), 'sales − ingredient cost')}
+            ${kpi('Waste', money(d.stock.waste_cents), d.stock.count_loss_cents || d.stock.count_gain_cents ? `count: −${money(d.stock.count_loss_cents)} / +${money(d.stock.count_gain_cents)}` : 'no count differences')}
+            ${kpi('Goods received', money(d.stock.purchases_cents), 'supplier invoices in this period')}
+          </div></div>` : ''}
         <div class="rep-grid">
           <div class="rep-card"><h3>By category</h3>${meterTable(d.by_category, [{ h: 'Category', f: (r) => esc(r.category), meter: true }, { h: 'Qty', f: (r) => r.qty, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }])}</div>
           <div class="rep-card"><h3>Top 10 dishes</h3>${meterTable(d.top_items, [{ h: 'Dish', f: (r) => `${esc(r.name)}<div class="muted" style="font-size:12px">${esc(r.category)}</div>`, meter: true }, { h: 'Qty', f: (r) => r.qty, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }], 'qty')}</div>
@@ -889,6 +901,15 @@
           <div class="rep-card"><h3>Staff</h3>${meterTable(d.staff, [{ h: 'Name', f: (r) => `${esc(r.name)}<div class="muted" style="font-size:12px">${esc(r.role)}</div>`, meter: true }, { h: 'Orders', f: (r) => r.orders, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }, { h: 'Avg bill', f: (r) => money(r.avg_cents), right: true }, { h: 'Voids', f: (r) => r.voids, right: true }])}</div>
           <div class="rep-card"><h3>Tables</h3>${meterTable(d.tables, [{ h: 'Table', f: (r) => `${esc(r.code)} <span class="muted">${esc(r.area)}</span>`, meter: true }, { h: 'Turns', f: (r) => r.orders, right: true }, { h: 'Covers', f: (r) => r.covers, right: true }, { h: 'Avg time', f: (r) => `${r.avg_minutes} min`, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }])}</div>
         </div>
+        ${d.stock.has_recipes ? `<div class="rep-grid">
+          <div class="rep-card"><h3>Profit by dish <small class="muted">current recipe cost</small></h3>${meterTable(d.dish_profit.slice(0, 15), [
+            { h: 'Dish', f: (r) => esc(r.name), meter: true }, { h: 'Qty', f: (r) => r.qty, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true },
+            { h: 'Cost', f: (r) => (r.cost_cents === null ? '<span class="muted">no recipe</span>' : money(r.cost_cents)), right: true },
+            { h: 'Margin', f: (r) => (r.margin_pct === null ? '—' : `<span class="fc ${r.margin_pct < 65 ? 'high' : ''}">${r.margin_pct}%</span>`), right: true }], 'cents')}</div>
+          <div class="rep-card"><h3>Waste</h3>${meterTable(d.waste, [
+            { h: 'Time', f: (r) => new Date(r.created_at).toLocaleString('en-GB', { timeZone: S.cfg.timezone, day: '2-digit', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true }) },
+            { h: 'Ingredient', f: (r) => `${fq(r.qty)} ${esc(r.unit)} ${esc(r.name)}` }, { h: 'Reason', f: (r) => esc(r.note || '') }, { h: 'By', f: (r) => esc(r.staff_name || '') },
+            { h: 'Value', f: (r) => money(r.value_cents), right: true }], 'value_cents')}</div></div>` : ''}
         <div class="rep-card"><h3>Voided items</h3>${meterTable(d.voids, [{ h: 'Time', f: (r) => new Date(r.created_at).toLocaleString('en-GB', { timeZone: S.cfg.timezone, day: '2-digit', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true }) }, { h: 'Order', f: (r) => '#' + r.order_no }, { h: 'Item', f: (r) => `${r.qty} × ${esc(r.name)}` }, { h: 'Reason', f: (r) => esc(r.reason) }, { h: 'By', f: (r) => esc(r.staff_name || '') }, { h: 'Approved', f: (r) => esc(r.approved_name || '') }, { h: 'Value', f: (r) => money(r.amount_cents), right: true }], 'amount_cents')}</div>
         <div class="rep-card"><h3>Refunds</h3>${meterTable(d.refunds, [{ h: 'Time', f: (r) => new Date(r.created_at).toLocaleString('en-GB', { timeZone: S.cfg.timezone, day: '2-digit', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true }) }, { h: 'Order', f: (r) => '#' + r.order_no }, { h: 'Method', f: (r) => r.method }, { h: 'Reason', f: (r) => esc(r.reason) }, { h: 'By', f: (r) => esc(r.staff_name || '') }, { h: 'Approved', f: (r) => esc(r.approved_name || '') }, { h: 'Amount', f: (r) => money(r.amount_cents), right: true }], 'amount_cents')}</div>
       </div></section>`;
@@ -912,6 +933,13 @@
     sec('Payments', ['Method', 'Orders', 'Taken', 'Refunded', 'Net'], d.by_payment.map((x) => [x.method, x.orders, m(x.cents), m(x.refund_cents), m(x.cents - x.refund_cents)]));
     sec('Staff', ['Name', 'Role', 'Orders', 'Sales', 'Avg bill', 'Tips', 'Voids'], d.staff.map((x) => [x.name, x.role, x.orders, m(x.cents), m(x.avg_cents), m(x.tip_cents), x.voids]));
     sec('Tables', ['Table', 'Area', 'Turns', 'Covers', 'Avg minutes', 'Sales'], d.tables.map((x) => [x.code, x.area, x.orders, x.covers, x.avg_minutes, m(x.cents)]));
+    if (d.stock.has_recipes) {
+      const st = d.stock;
+      sec('Food cost', ['Measure', 'Value'], [['Food & drink sales', m(st.food_sales_cents)], ['Cost of ingredients', m(st.cogs_cents)], ['Food cost %', st.food_cost_pct],
+        ['Gross profit', m(st.gross_profit_cents)], ['Waste', m(st.waste_cents)], ['Count shortage', m(st.count_loss_cents)], ['Count surplus', m(st.count_gain_cents)], ['Goods received', m(st.purchases_cents)]]);
+      sec('Profit by dish', ['Dish', 'Qty', 'Sales', 'Cost', 'Profit', 'Margin %'], d.dish_profit.map((x) => [x.name, x.qty, m(x.cents), x.cost_cents === null ? '' : m(x.cost_cents), x.profit_cents === null ? '' : m(x.profit_cents), x.margin_pct ?? '']));
+      sec('Waste', ['Time', 'Ingredient', 'Qty', 'Unit', 'Value', 'Reason', 'By'], d.waste.map((x) => [x.created_at, x.name, x.qty, x.unit, m(x.value_cents), x.note, x.staff_name]));
+    }
     sec('Voided items', ['Time', 'Order', 'Item', 'Qty', 'Value', 'Reason', 'By', 'Approved by'], d.voids.map((x) => [x.created_at, x.order_no, x.name, x.qty, m(x.amount_cents), x.reason, x.staff_name, x.approved_name]));
     sec('Refunds', ['Time', 'Order', 'Method', 'Amount', 'Reason', 'By', 'Approved by'], d.refunds.map((x) => [x.created_at, x.order_no, x.method, m(x.amount_cents), x.reason, x.staff_name, x.approved_name]));
     const blob = new Blob(['﻿' + out.join('\r\n')], { type: 'text/csv;charset=utf-8' });
@@ -993,6 +1021,297 @@
           <td><span class="s ${/void|refund|failed/.test(e.action) ? 'ready' : 'paid'}">${esc(e.action)}</span></td><td class="name">${esc(e.summary)}</td>
           <td>${esc(e.staff_name || '—')}</td><td>${esc(e.approved_name || '')}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Nothing logged yet.</td></tr>'}
       </tbody></table></div>`;
+  }
+
+  // ---------- stock / inventory ----------
+  const STOCK_SECTIONS = [['stock', 'Stock levels'], ['recipes', 'Recipes & cost'], ['purchases', 'Receive goods'], ['suppliers', 'Suppliers'], ['reorder', 'Reorder list'], ['count', 'Stock count']];
+  const PAY_LABEL = { credit: 'On credit (pay later)', drawer: 'Cash from the drawer', cash: 'Cash (not from drawer)', bank: 'Bank transfer', card: 'Card', cheque: 'Cheque' };
+  const fq = (n) => (n === null || n === undefined ? '—' : (+(+n).toFixed(3)).toLocaleString('en-US', { maximumFractionDigits: 3 }));
+  const unitCost = (c) => money(Math.round(c));
+  const STATUS_TXT = { ok: 'OK', low: 'Low', out: 'Out', hidden: 'Hidden' };
+  async function loadInv(what = S.inv.section) {
+    const jobs = [api('/inventory').then((d) => { S.inv.data = d; })];
+    if (what === 'recipes') jobs.push(api('/inventory/recipes').then((d) => { S.inv.recipes = d.items; }));
+    if (what === 'purchases') jobs.push(api('/inventory/purchases').then((d) => { S.inv.purchases = d.purchases; }));
+    if (what === 'reorder') jobs.push(api('/inventory/reorder').then((d) => { S.inv.reorder = d.groups; }));
+    await Promise.all(jobs);
+    const sel = S.inv.sel;
+    if (sel?.kind === 'ingredient' && sel.id) S.inv.moves = (await api(`/inventory/ingredients/${sel.id}/moves`)).moves;
+    if (sel?.kind === 'supplier' && sel.id) S.inv.supDetail = await api(`/inventory/suppliers/${sel.id}`);
+    if (sel?.kind === 'purchase-view') S.inv.purDetail = await api(`/inventory/purchases/${sel.id}`);
+  }
+  const ingOptions = (cur, blank = 'Pick ingredient') => `<option value="">${blank}</option>` + S.inv.data.ingredients.filter((g) => g.active || g.id === cur)
+    .map((g) => `<option value="${g.id}" data-unit="${esc(g.unit)}" data-cost="${g.cost_cents}" ${g.id === cur ? 'selected' : ''}>${esc(g.name)} (${esc(g.unit)})</option>`).join('');
+  const supOptions = (cur, blank = '— None —') => `<option value="">${blank}</option>` + S.inv.data.suppliers.filter((x) => x.active || x.id === cur)
+    .map((x) => `<option value="${x.id}" ${x.id === cur ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
+
+  function stockHead(title, sub, actions = '') {
+    return `<div class="page-head" style="border-bottom:0"><div><div class="eyebrow">Stock</div><h1 class="title">${title}</h1><div class="muted">${sub}</div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">${actions}</div></div>`;
+  }
+  function stockList() {
+    const I = S.inv; const D = I.data;
+    if (!D) return '<div class="empty">Loading…</div>';
+    const selCls = (kind, id) => (I.sel?.kind === kind && I.sel?.id === id ? 'sel' : '');
+    if (I.section === 'stock') {
+      if (!D.ingredients.length) {
+        return stockHead('Stock levels', 'No ingredients yet.') + `<div class="empty-card"><h3>Start your stock list</h3>
+          <p class="muted">Add ingredients one by one, or load a sample set for the Asian menu: 36 ingredients with opening stock, 4 suppliers and recipes for 32 dishes. You can edit or delete all of it afterwards.</p>
+          <div style="display:flex;gap:8px"><button type="button" class="btn red" data-act="inv-sample">Load sample ingredients & recipes</button>
+          <button type="button" class="btn" data-act="inv-new" data-kind="ingredient">+ Add ingredient</button></div></div>`;
+      }
+      const q = I.q.trim().toLowerCase();
+      const list = D.ingredients.filter((g) => (I.filter === 'all' ? g.active : I.filter === 'hidden' ? !g.active : g.status === I.filter) && (!q || g.name.toLowerCase().includes(q)));
+      return stockHead('Stock levels', `${D.stats.count} ingredients · stock worth ${money(D.stats.value_cents)} · ${D.stats.low} low · ${D.stats.out} out${D.stats.owed_cents ? ` · ${money(D.stats.owed_cents)} owed to suppliers` : ''}`,
+        `<input id="inv-q" class="admin-search" type="search" placeholder="Search ingredients..." value="${esc(I.q)}">
+         <div class="seg">${[['all', 'All'], ['low', `Low (${D.stats.low})`], ['out', `Out (${D.stats.out})`], ['hidden', 'Hidden']].map(([k, l]) => `<button type="button" class="${I.filter === k ? 'on' : ''}" data-act="inv-filter" data-v="${k}">${l}</button>`).join('')}</div>
+         <button type="button" class="btn dark" data-act="inv-new" data-kind="ingredient">+ Add ingredient</button>`)
+        + `<div class="htable-wrap"><table class="htable"><thead><tr><th>Ingredient</th><th style="text-align:right">In stock</th><th style="text-align:right">Reorder at</th><th style="text-align:right">Avg cost</th><th style="text-align:right">Value</th><th>Status</th></tr></thead><tbody>
+          ${list.map((g) => `<tr class="${selCls('ingredient', g.id)}" data-act="inv-sel" data-kind="ingredient" data-id="${g.id}">
+            <td class="name"><b>${esc(g.name)}</b><div class="muted" style="font-size:12px">${[g.supplier_name, g.used_in ? `${g.used_in} recipe${g.used_in > 1 ? 's' : ''}` : ''].filter(Boolean).map(esc).join(' · ')}</div></td>
+            <td style="text-align:right"><b class="${g.stock <= 0 ? 'note-red' : ''}">${fq(g.stock)}</b> ${esc(g.unit)}</td><td style="text-align:right">${fq(g.reorder_level)} ${esc(g.unit)}</td>
+            <td style="text-align:right">${unitCost(g.cost_cents)}/${esc(g.unit)}</td><td style="text-align:right">${money(g.value_cents)}</td>
+            <td><span class="stk ${g.status}">${STATUS_TXT[g.status]}</span></td></tr>`).join('') || '<tr><td colspan="6" class="muted">Nothing here.</td></tr>'}
+          </tbody></table></div>`;
+    }
+    if (I.section === 'recipes') {
+      if (!I.recipes) return '<div class="empty">Loading…</div>';
+      const list = I.recipes.filter((m) => (I.rfilter === 'missing' ? !m.lines.length && m.active : I.rfilter === 'high' ? m.food_cost_pct > 35 : m.active));
+      const withR = I.recipes.filter((m) => m.active && m.lines.length);
+      const avg = withR.length ? withR.reduce((t, m) => t + m.food_cost_pct, 0) / withR.length : 0;
+      return stockHead('Recipes & cost', `${withR.length} of ${I.recipes.filter((m) => m.active).length} dishes have a recipe · average food cost ${avg.toFixed(1)}%`,
+        `<div class="seg">${[['all', 'All dishes'], ['missing', 'No recipe'], ['high', 'Food cost over 35%']].map(([k, l]) => `<button type="button" class="${(I.rfilter || 'all') === k ? 'on' : ''}" data-act="inv-rfilter" data-v="${k}">${l}</button>`).join('')}</div>`)
+        + `<div class="htable-wrap"><table class="htable"><thead><tr><th>Dish</th><th>Category</th><th style="text-align:right">Price</th><th style="text-align:right">Cost</th><th style="text-align:right">Food cost</th><th style="text-align:right">Can make</th></tr></thead><tbody>
+          ${list.map((m) => `<tr class="${selCls('recipe', m.id)}" data-act="inv-sel" data-kind="recipe" data-id="${m.id}">
+            <td class="name"><b>${esc(m.name)}</b>${m.stock_out ? ' <span class="stk out">Out</span>' : ''}</td><td>${esc(m.category)}</td>
+            <td style="text-align:right">${money(m.price_cents)}</td><td style="text-align:right">${m.lines.length ? money(m.cost_cents) : '—'}</td>
+            <td style="text-align:right">${m.food_cost_pct === null ? '<span class="muted">No recipe</span>' : `<span class="fc ${m.food_cost_pct > 35 ? 'high' : ''}">${m.food_cost_pct}%</span>`}</td>
+            <td style="text-align:right">${m.can_make === null ? '—' : m.can_make}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">Nothing here.</td></tr>'}
+          </tbody></table></div>`;
+    }
+    if (I.section === 'purchases') {
+      if (!I.purchases) return '<div class="empty">Loading…</div>';
+      return stockHead('Receive goods', 'Record supplier deliveries. Stock and average costs update when you save.',
+        `<button type="button" class="btn dark" data-act="inv-new" data-kind="purchase">+ Receive goods</button>`)
+        + `<div class="htable-wrap"><table class="htable"><thead><tr><th>Date</th><th>Supplier</th><th>Invoice</th><th style="text-align:right">Items</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th>Status</th></tr></thead><tbody>
+          ${I.purchases.map((p) => { const due = p.total_cents - p.paid_cents; return `<tr class="${selCls('purchase-view', p.id)}" data-act="inv-sel" data-kind="purchase-view" data-id="${p.id}">
+            <td>${esc(String(p.invoice_date).slice(0, 10))}</td><td class="name"><b>${esc(p.supplier_name || '—')}</b></td><td>${esc(p.invoice_no || '—')}</td>
+            <td style="text-align:right">${p.lines}</td><td style="text-align:right"><b>${money(p.total_cents)}</b></td><td style="text-align:right">${money(p.paid_cents)}</td>
+            <td><span class="stk ${due <= 0 ? 'ok' : 'low'}">${due <= 0 ? 'Paid' : `Owes ${money(due)}`}</span></td></tr>`; }).join('') || '<tr><td colspan="7" class="muted">No deliveries recorded yet.</td></tr>'}
+          </tbody></table></div>`;
+    }
+    if (I.section === 'suppliers') {
+      return stockHead('Suppliers', `${D.suppliers.filter((x) => x.active).length} suppliers · ${money(D.stats.owed_cents)} owed`,
+        `<button type="button" class="btn dark" data-act="inv-new" data-kind="supplier">+ Add supplier</button>`)
+        + `<div class="htable-wrap"><table class="htable"><thead><tr><th>Supplier</th><th>Phone</th><th style="text-align:right">Bought</th><th style="text-align:right">Paid</th><th style="text-align:right">Balance</th><th>Last delivery</th></tr></thead><tbody>
+          ${D.suppliers.map((x) => `<tr class="${selCls('supplier', x.id)}" data-act="inv-sel" data-kind="supplier" data-id="${x.id}">
+            <td class="name"><b>${esc(x.name)}</b>${x.active ? '' : ' <span class="muted">(hidden)</span>'}</td><td>${esc(x.phone || '—')}</td>
+            <td style="text-align:right">${money(x.purchased_cents)}</td><td style="text-align:right">${money(x.paid_cents)}</td>
+            <td style="text-align:right"><b class="${x.balance_cents > 0 ? 'note-red' : ''}">${money(x.balance_cents)}</b></td><td>${x.last_purchase ? esc(String(x.last_purchase).slice(0, 10)) : '—'}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No suppliers yet.</td></tr>'}
+          </tbody></table></div>`;
+    }
+    if (I.section === 'reorder') {
+      if (!I.reorder) return '<div class="empty">Loading…</div>';
+      const total = I.reorder.reduce((t, g) => t + g.est_cents, 0);
+      return stockHead('Reorder list', I.reorder.length ? `Ingredients at or below their reorder level · estimated ${money(total)}` : 'Nothing is low right now.',
+        I.reorder.length ? `<button type="button" class="btn" data-act="inv-reorder-print">Print list</button>` : '')
+        + `<div style="padding:0 28px 28px">${I.reorder.map((g) => `<div class="rep-card"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap">
+            <h3 style="margin:0">${esc(g.supplier_name)} ${g.supplier_phone ? `<small class="muted">${esc(g.supplier_phone)}</small>` : ''}</h3>
+            <div style="display:flex;gap:10px;align-items:center"><span class="muted">≈ ${money(g.est_cents)}</span>
+            ${g.supplier_id ? `<button type="button" class="btn dark" data-act="inv-reorder-receive" data-id="${g.supplier_id}">Receive this order</button>` : ''}</div></div>
+          <table class="htable rep" style="margin-top:10px"><thead><tr><th>Ingredient</th><th style="text-align:right">In stock</th><th style="text-align:right">Reorder at</th><th style="text-align:right">Order up to</th><th style="text-align:right">Suggested</th><th style="text-align:right">≈ Cost</th></tr></thead><tbody>
+          ${g.items.map((i) => `<tr><td><b>${esc(i.name)}</b></td><td style="text-align:right" class="${i.stock <= 0 ? 'note-red' : ''}">${fq(i.stock)} ${esc(i.unit)}</td><td style="text-align:right">${fq(i.reorder_level)}</td>
+            <td style="text-align:right">${i.par_level ? fq(i.par_level) : '—'}</td><td style="text-align:right"><b>${fq(i.suggest)} ${esc(i.unit)}</b></td><td style="text-align:right">${money(i.est_cents)}</td></tr>`).join('')}</tbody></table></div>`).join('')
+          || '<div class="empty-card"><h3>All stocked up</h3><p class="muted">Ingredients appear here when their stock falls to the reorder level.</p></div>'}</div>`;
+    }
+    // stock count
+    const act = D.ingredients.filter((g) => g.active);
+    return stockHead('Stock count', 'Count what is on the shelves. Only the rows you fill in are changed; differences are recorded with their value.',
+      `<button type="button" class="btn" data-act="inv-count-print">Print count sheet</button>`)
+      + `<form id="count-form" style="padding:0 28px 28px"><table class="htable"><thead><tr><th>Ingredient</th><th style="text-align:right">System says</th><th style="width:150px">Counted</th><th style="text-align:right">Difference</th><th style="text-align:right">Value</th></tr></thead><tbody>
+        ${act.map((g) => `<tr><td class="name"><b>${esc(g.name)}</b></td><td style="text-align:right">${fq(g.stock)} ${esc(g.unit)}</td>
+          <td><div class="count-in"><input name="c_${g.id}" data-count="${g.id}" data-stock="${g.stock}" data-cost="${g.cost_cents}" data-unit="${esc(g.unit)}" inputmode="decimal" placeholder="—"><span>${esc(g.unit)}</span></div></td>
+          <td style="text-align:right" id="cd_${g.id}" class="muted">—</td><td style="text-align:right" id="cv_${g.id}" class="muted">—</td></tr>`).join('')}
+        </tbody></table>
+        <div class="count-foot"><input name="note" class="admin-search" style="width:320px" placeholder="Note, e.g. Weekly count Sunday night" maxlength="200">
+          <span id="count-sum" class="muted">No counts entered</span><button type="submit" class="btn red">Save count</button></div></form>`;
+  }
+
+  // ---------- stock: right-hand panel ----------
+  function moveLabel(m) {
+    return { sale: m.order_no ? `Sold · order #${m.order_no}` : 'Sold', purchase: `Received${m.invoice_no ? ' · ' + esc(m.invoice_no) : ''}`, waste: `Waste · ${esc(m.note || '')}`,
+      count: `Count · ${esc(m.note || '')}`, adjust: `Adjusted · ${esc(m.note || '')}`, opening: 'Opening stock' }[m.kind];
+  }
+  function recipeRow(l = {}) {
+    return `<div class="rec-row"><select data-f="ing">${ingOptions(l.ingredient_id)}</select>
+      <input data-f="qty" inputmode="decimal" placeholder="Qty" value="${l.qty != null ? +(+l.qty).toFixed(4) : ''}"><span class="rec-unit">${esc(l.unit || '')}</span>
+      <span class="rec-cost muted"></span><button type="button" data-act="rec-del" title="Remove">✕</button></div>`;
+  }
+  function purchaseRow(l = {}) {
+    return `<div class="pur-row"><div class="pr1"><select data-f="ing">${ingOptions(l.ingredient_id)}</select><button type="button" data-act="rec-del" title="Remove">✕</button></div>
+      <div class="pr2"><label><span>Qty <i class="rec-unit">${esc(l.unit || '')}</i></span><input data-f="qty" inputmode="decimal" placeholder="0" value="${l.qty ?? ''}"></label>
+        <label><span>Unit cost</span><input data-f="unit" inputmode="decimal" placeholder="0.00" value="${l.unit_cost ?? ''}"></label>
+        <label><span>Line total</span><input data-f="total" inputmode="decimal" placeholder="0.00" value="${l.line_total ?? ''}"></label></div></div>`;
+  }
+  function stockPanel() {
+    const I = S.inv; const s = I.sel; const D = I.data;
+    if (!D) return '';
+    if (!s) {
+      const hints = {
+        stock: 'Select an ingredient to edit it, record waste, or see its stock history.',
+        recipes: 'Select a dish to set what goes into one portion. Stock comes off automatically when the bill is paid.',
+        purchases: 'Select a delivery to see its lines and payments, or receive new goods.',
+        suppliers: 'Select a supplier to see deliveries and record payments.',
+        reorder: '"Receive this order" opens a delivery form filled in with the suggested amounts. Adjust it to what actually arrived.',
+        count: 'Tip: print the count sheet, count in the store room, then enter the figures here.',
+      };
+      return `<div class="empty" style="padding:28px 20px">${hints[I.section] || ''}</div>`;
+    }
+    const foot = (del = '') => `<div class="form-foot">${del || '<span></span>'}<button type="button" class="btn" data-act="inv-cancel">Cancel</button><button type="submit" class="btn red">Save</button></div>`;
+    if (s.kind === 'ingredient') {
+      const g = (s.id && D.ingredients.find((x) => x.id === s.id)) || { name: '', unit: 'kg', reorder_level: 0, par_level: 0, cost_cents: 0, supplier_id: null, active: true, stock: 0 };
+      return `<form id="ing-form" autocomplete="off"><div class="hd"><div class="eyebrow">${s.id ? 'Ingredient' : 'New ingredient'}</div><h2>${esc(s.id ? g.name : 'Add ingredient')}</h2>
+          ${s.id ? `<div class="muted">${fq(g.stock)} ${esc(g.unit)} in stock · worth ${money(g.value_cents)}</div>
+            <div style="display:flex;gap:8px;margin-top:10px"><button type="button" class="btn" data-act="inv-adjust" data-kind="waste">Record waste</button><button type="button" class="btn" data-act="inv-adjust" data-kind="adjust">Adjust</button></div>` : ''}</div>
+        <div class="form-body">
+          ${field('Name', inp('name', g.name, 'required maxlength="60"'))}
+          <div class="two">${field('Unit', sel('unit', D.units.map((u) => [u, u]), g.unit), s.id ? 'Changing the unit does not convert existing quantities.' : '')}
+            ${field('Cost per unit', inp('cost', (g.cost_cents / 100).toFixed(2), 'inputmode="decimal"'), 'Updated automatically when goods are received.')}</div>
+          <div class="two">${field('Reorder at', inp('reorder_level', g.reorder_level, 'inputmode="decimal"'), 'Shows as Low at or below this.')}
+            ${field('Order up to', inp('par_level', g.par_level, 'inputmode="decimal"'), 'Used for the suggested order.')}</div>
+          ${field('Usual supplier', `<select name="supplier_id">${supOptions(g.supplier_id)}</select>`)}
+          ${s.id ? '' : field('Opening stock', inp('opening_stock', '', 'inputmode="decimal" placeholder="0"'), 'What you have right now.')}
+          <div class="field">${check('active', g.active, 'Active')}</div>
+          ${s.id && I.moves ? `<div class="field"><label>Recent stock history</label><div class="moves">${I.moves.map((m) => `<div class="mv">
+              <span>${new Date(m.created_at).toLocaleString('en-GB', { timeZone: S.cfg.timezone, day: '2-digit', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true })}</span>
+              <span class="what">${moveLabel(m)}${m.staff_name ? ` <span class="muted">· ${esc(m.staff_name)}</span>` : ''}</span>
+              <b class="${m.change < 0 ? 'note-red' : ''}">${m.change > 0 ? '+' : ''}${fq(m.change)}</b><span class="muted">${fq(m.stock_after)}</span></div>`).join('') || '<div class="muted">No movements yet.</div>'}</div></div>` : ''}
+        </div>${foot()}</form>`;
+    }
+    if (s.kind === 'recipe') {
+      const m = I.recipes.find((x) => x.id === s.id);
+      if (!m) return '';
+      return `<form id="recipe-form" autocomplete="off"><div class="hd"><div class="eyebrow">Recipe · one portion</div><h2>${esc(m.name)}</h2>
+          <div class="muted">${esc(m.category)} · sells for ${money(m.price_cents)}</div></div>
+        <div class="form-body">
+          ${D.ingredients.length ? `<div id="rec-rows">${(m.lines.length ? m.lines : [{}]).map(recipeRow).join('')}</div>
+          <button type="button" class="link-red" data-act="rec-add">+ Add ingredient</button>
+          <div class="rec-total" id="rec-total" data-price="${m.price_cents}"></div>
+          <small class="muted" style="display:block;margin-top:8px">Quantities are in each ingredient's unit, e.g. 0.12 kg chicken, 2 pcs roti.
+            Add-ons are not deducted from stock.</small>` : '<div class="muted">Add ingredients in Stock levels first.</div>'}
+        </div>${foot()}</form>`;
+    }
+    if (s.kind === 'purchase') {
+      const pre = s.prefill || {};
+      const today = isoDay(new Date());
+      return `<form id="purchase-form" autocomplete="off"><div class="hd"><div class="eyebrow">Receive goods</div><h2>New delivery</h2></div>
+        <div class="form-body">
+          ${field('Supplier', `<select name="supplier_id" required>${supOptions(pre.supplier_id, 'Pick supplier')}</select>`)}
+          <div class="two">${field('Invoice no.', inp('invoice_no', '', 'maxlength="40"'))}${field('Invoice date', `<input name="invoice_date" type="date" value="${today}">`)}</div>
+          <div class="field"><label>Items received</label>
+            <div id="pur-rows">${(pre.lines && pre.lines.length ? pre.lines : [{}, {}]).map(purchaseRow).join('')}</div>
+            <button type="button" class="link-red" data-act="pur-add">+ Add line</button>
+            <div class="rec-total" id="pur-total"></div></div>
+          <div class="two">${field('Payment', sel('pay_method', Object.entries(PAY_LABEL), 'credit'))}${field('Amount paid now', inp('pay_amount', '', 'inputmode="decimal" placeholder="0.00"'))}</div>
+          <div class="two">${field('Payment reference', inp('pay_reference', '', 'maxlength="80" placeholder="Cheque / transfer no."'))}${field('Pay by (due date)', '<input name="due_date" type="date">')}</div>
+          ${field('Notes', inp('notes', '', 'maxlength="300"'))}
+        </div>${foot()}</form>`;
+    }
+    if (s.kind === 'purchase-view') {
+      const p = I.purDetail;
+      if (!p) return '<div class="empty">Loading…</div>';
+      const due = p.total_cents - p.paid_cents;
+      return `<div class="hd"><div class="eyebrow">Delivery · ${esc(String(p.invoice_date).slice(0, 10))}</div><h2>${esc(p.supplier_name || '')}</h2>
+          <div class="muted">${p.invoice_no ? 'Invoice ' + esc(p.invoice_no) + ' · ' : ''}received by ${esc(p.staff_name || '')}${p.due_date ? ' · due ' + esc(String(p.due_date).slice(0, 10)) : ''}</div>
+          ${due > 0 ? `<button type="button" class="btn dark" style="margin-top:10px" data-act="sup-pay" data-id="${p.supplier_id}" data-purchase="${p.id}" data-due="${due}">Pay ${money(due)}</button>` : ''}</div>
+        <div class="sec"><div class="lbl">ITEMS</div>${p.items.map((i) => `<div class="r3"><span>${fq(i.qty)} ${esc(i.unit)}</span><span>${esc(i.name)} <span class="muted">@ ${unitCost(i.unit_cost_cents)}</span></span><span>${money(i.line_cents)}</span></div>`).join('')}
+          <div class="r3 tot"><span></span><span>Total</span><span>${money(p.total_cents)}</span></div></div>
+        <div class="sec"><div class="lbl">PAYMENTS</div>${p.payments.map((x) => `<div class="r3"><span>${esc(String(x.paid_at).slice(0, 10))}</span><span>${esc(PAY_LABEL[x.method] || x.method)}${x.reference ? ' · ' + esc(x.reference) : ''}</span><span>${money(x.amount_cents)}</span></div>`).join('') || '<div class="muted">Not paid yet.</div>'}
+          ${due > 0 ? `<div class="r3 tot"><span></span><span>Still owed</span><span class="note-red">${money(due)}</span></div>` : ''}</div>
+        ${p.notes ? `<div class="sec"><div class="lbl">NOTES</div>${esc(p.notes)}</div>` : ''}`;
+    }
+    if (s.kind === 'supplier') {
+      const x = (s.id && D.suppliers.find((y) => y.id === s.id)) || { name: '', phone: '', email: '', address: '', notes: '', active: true, balance_cents: 0 };
+      const det = I.supDetail;
+      return `<form id="supplier-form" autocomplete="off"><div class="hd"><div class="eyebrow">${s.id ? 'Supplier' : 'New supplier'}</div><h2>${esc(s.id ? x.name : 'Add supplier')}</h2>
+          ${s.id ? `<div class="muted">Balance ${money(x.balance_cents)}</div>${x.balance_cents > 0 ? `<button type="button" class="btn dark" style="margin-top:10px" data-act="sup-pay" data-id="${x.id}" data-due="${x.balance_cents}">Record payment</button>` : ''}` : ''}</div>
+        <div class="form-body">
+          ${field('Name', inp('name', x.name, 'required maxlength="80"'))}
+          <div class="two">${field('Phone', inp('phone', x.phone, 'maxlength="30" placeholder="+94 "'))}${field('Email', inp('email', x.email, 'maxlength="80"'))}</div>
+          ${field('Address', inp('address', x.address, 'maxlength="200"'))}${field('Notes', inp('notes', x.notes, 'maxlength="300" placeholder="Delivery days, credit terms…"'))}
+          <div class="field">${check('active', x.active, 'Active')}</div>
+          ${s.id && det ? `<div class="field"><label>Recent deliveries</label>${det.purchases.map((p) => `<div class="r3"><span>${esc(String(p.invoice_date).slice(0, 10))}</span><span>${esc(p.invoice_no || '—')}</span><span>${money(p.total_cents)}</span></div>`).join('') || '<div class="muted">None</div>'}</div>
+            <div class="field"><label>Payments</label>${det.payments.map((p) => `<div class="r3"><span>${esc(String(p.paid_at).slice(0, 10))}</span><span>${esc(PAY_LABEL[p.method] || p.method)}${p.reference ? ' · ' + esc(p.reference) : ''}</span><span>${money(p.amount_cents)}</span></div>`).join('') || '<div class="muted">None</div>'}</div>` : ''}
+        </div>${foot()}</form>`;
+    }
+    return '';
+  }
+  function stockView() {
+    if (!isManager()) return '<section class="start"><h1 class="title">Managers only</h1></section>';
+    return `<section class="admin">
+      <aside class="cats scroll"><div class="label">STOCK</div>
+        ${STOCK_SECTIONS.map(([id, label]) => `<button type="button" class="cat ${S.inv.section === id ? 'on' : ''}" data-act="inv-section" data-id="${id}">${label}${id === 'reorder' && S.floor?.stats?.stock_alerts ? `<small class="note-red">${S.floor.stats.stock_alerts}</small>` : ''}</button>`).join('')}
+      </aside>
+      <div class="scroll" id="inv-list">${stockList()}</div>
+      <aside class="hdetail scroll admin-form">${stockPanel()}</aside>
+    </section>`;
+  }
+  // live sums in the recipe / purchase / count forms
+  function updateRecipeTotal() {
+    const box = $('#rec-total'); if (!box) return;
+    let total = 0;
+    document.querySelectorAll('#rec-rows .rec-row').forEach((r) => {
+      const o = r.querySelector('select').selectedOptions[0];
+      const qty = parseFloat(r.querySelector('[data-f="qty"]').value);
+      const cost = o && o.value ? +o.dataset.cost : 0;
+      r.querySelector('.rec-unit').textContent = o && o.value ? o.dataset.unit : '';
+      const line = Number.isFinite(qty) ? qty * cost : 0;
+      r.querySelector('.rec-cost').textContent = line ? money(Math.round(line)) : '';
+      total += line;
+    });
+    const price = +box.dataset.price;
+    const pct = price ? (total / price) * 100 : 0;
+    box.innerHTML = `<span>Cost per portion <b>${money(Math.round(total))}</b></span><span>Food cost <b class="fc ${pct > 35 ? 'high' : ''}">${pct.toFixed(1)}%</b></span><span>Profit <b>${money(Math.round(price - total))}</b></span>`;
+  }
+  function updatePurchaseTotal(changed) {
+    const box = $('#pur-total'); if (!box) return;
+    let total = 0;
+    document.querySelectorAll('#pur-rows .pur-row').forEach((r) => {
+      const o = r.querySelector('select').selectedOptions[0];
+      r.querySelector('.rec-unit').textContent = o && o.value ? o.dataset.unit : '';
+      const qty = parseFloat(r.querySelector('[data-f="qty"]').value);
+      const u = r.querySelector('[data-f="unit"]'); const t = r.querySelector('[data-f="total"]');
+      if (changed && r.contains(changed) && Number.isFinite(qty) && qty > 0) {
+        if (changed === u && u.value !== '') t.value = (parseFloat(u.value) * qty).toFixed(2);
+        else if (changed === t && t.value !== '') u.value = (parseFloat(t.value) / qty).toFixed(2);
+        else if (changed.dataset.f === 'qty' && u.value !== '') t.value = (parseFloat(u.value) * qty).toFixed(2);
+      }
+      if (changed && changed.tagName === 'SELECT' && r.contains(changed) && o && o.value && u.value === '') u.value = (+o.dataset.cost / 100).toFixed(2);
+      const lt = parseFloat(t.value);
+      if (Number.isFinite(lt)) total += lt;
+    });
+    box.innerHTML = `<span>Invoice total <b>${money(Math.round(total * 100))}</b></span>`;
+  }
+  function updateCount() {
+    let n = 0; let loss = 0; let gain = 0;
+    document.querySelectorAll('[data-count]').forEach((x) => {
+      const id = x.dataset.count; const dEl = $('#cd_' + id); const vEl = $('#cv_' + id);
+      if (x.value === '') { dEl.textContent = '—'; vEl.textContent = '—'; dEl.className = vEl.className = 'muted'; return; }
+      const diff = parseFloat(x.value) - parseFloat(x.dataset.stock);
+      if (!Number.isFinite(diff)) return;
+      n++;
+      const val = Math.round(Math.abs(diff) * +x.dataset.cost);
+      if (diff < 0) loss += val; else gain += val;
+      dEl.textContent = `${diff > 0 ? '+' : ''}${fq(diff)} ${x.dataset.unit}`;
+      vEl.textContent = diff ? (diff < 0 ? '−' : '+') + money(val) : '';
+      dEl.className = vEl.className = diff < 0 ? 'note-red' : diff > 0 ? '' : 'muted';
+    });
+    const sum = $('#count-sum');
+    if (sum) sum.textContent = n ? `${n} counted · short ${money(loss)} · over ${money(gain)}` : 'No counts entered';
+  }
+  function printSimple(title, rowsHtml) {
+    $('#print').innerHTML = `<h3>${esc(S.cfg.restaurant)}</h3><div class="c">${esc(title)}</div><div class="c">${new Date().toLocaleString('en-GB', { timeZone: S.cfg.timezone })}</div><hr>${rowsHtml}`;
+    window.print();
   }
 
   // ---------- modals ----------
@@ -1112,6 +1431,7 @@
     else if (S.tab === 'admin') view = adminView();
     else if (S.tab === 'shift') view = shiftView();
     else if (S.tab === 'reports') view = reportsView();
+    else if (S.tab === 'stock') view = stockView();
     // preserve focus/caret in search box across re-renders
     const active = document.activeElement?.id;
     const caret = active === 'search' ? document.activeElement.selectionStart : null;
@@ -1119,6 +1439,8 @@
     root.innerHTML = `<div class="app">${header()}<main>${view}</main></div>`;
     [...root.querySelectorAll('.scroll, .ticket-lines, .kcol-b')].forEach((e, i) => { if (scrolls[i]) e.scrollTop = scrolls[i]; });
     if (active === 'search') { const s = $('#search'); s.focus(); if (caret !== null) s.setSelectionRange(caret, caret); }
+    if ($('#rec-total')) updateRecipeTotal();
+    if ($('#pur-total')) updatePurchaseTotal();
     renderModal();
   }
 
@@ -1144,6 +1466,7 @@
     if (tab === 'admin' && isManager()) await loadAdmin();
     if (tab === 'shift') await loadShift();
     if (tab === 'reports' && isManager()) await loadReport();
+    if (tab === 'stock' && isManager()) await loadInv();
     if ((tab === 'order' || tab === 'bill') && S.order) await loadOrder();
     render();
   }
@@ -1364,6 +1687,65 @@
     },
     'copy-cmd': async () => { try { await navigator.clipboard.writeText($('#bridge-cmd').textContent); toast('Command copied'); } catch { toast('Select the command and copy it', true); } },
     'job-retry': async (d) => { await api(`/admin/printing/jobs/${d.id}/retry`, { body: {} }); await loadPrinting(); render(); },
+    'inv-section': async (d) => { S.inv.section = d.id; S.inv.sel = null; await loadInv(d.id); render(); },
+    'inv-filter': (d) => { S.inv.filter = d.v; render(); },
+    'inv-rfilter': (d) => { S.inv.rfilter = d.v; render(); },
+    'inv-sel': async (d) => {
+      S.inv.sel = { kind: d.kind, id: +d.id }; S.inv.moves = null; S.inv.supDetail = null; S.inv.purDetail = null;
+      render(); await loadInv(); render();
+    },
+    'inv-new': (d) => {
+      S.inv.sel = { kind: d.kind, id: null };
+      if (d.kind === 'purchase' && S.inv.section !== 'purchases') { S.inv.section = 'purchases'; }
+      render(); if (d.kind === 'purchase' && !S.inv.purchases) loadInv('purchases').then(render);
+      $('.admin-form form input, .admin-form form select')?.focus();
+    },
+    'inv-cancel': () => { S.inv.sel = null; render(); },
+    'inv-sample': async () => { const r = await api('/inventory/sample', { body: {} }); toast(`Loaded ${r.ingredients} ingredients, ${r.suppliers} suppliers and ${r.recipes} recipes`); await loadFloor(); await loadInv(); render(); },
+    'inv-adjust': (d) => {
+      const g = S.inv.data.ingredients.find((x) => x.id === S.inv.sel.id);
+      const waste = d.kind === 'waste';
+      formModal({ eyebrow: waste ? 'Record waste' : 'Adjust stock', title: `${g.name} · ${fq(g.stock)} ${g.unit} in stock`, submit: waste ? 'Record waste' : 'Save adjustment',
+        body: `${waste ? '' : `<label>Direction</label><select name="direction"><option value="remove">Remove from stock</option><option value="add">Add to stock</option></select>`}
+          <label>Quantity (${esc(g.unit)})</label><input name="qty" inputmode="decimal" required placeholder="0">
+          <label>Reason</label><div class="chips" style="margin-bottom:8px">${(waste ? ['Spoiled', 'Expired', 'Dropped', 'Burnt', 'Returned dish'] : ['Found extra', 'Staff meal', 'Moved to other branch', 'Correction'])
+            .map((r) => `<button type="button" class="chip" data-act="fill-note" data-v="${r}">${r}</button>`).join('')}</div>
+          <input name="note" maxlength="200" required placeholder="Or type a reason">`,
+        onSubmit: async (v) => {
+          await api(`/inventory/ingredients/${g.id}/adjust`, { body: { ...v, kind: waste ? 'waste' : 'adjust' } });
+          S.modal = null; toast(waste ? `Waste recorded: ${v.qty} ${g.unit} ${g.name}` : 'Stock adjusted'); await loadFloor(); await loadInv(); render();
+        } });
+    },
+    'fill-note': (d) => { const r = $('#modal-form [name="note"]'); if (r) { r.value = d.v; r.focus(); } },
+    'rec-add': () => { $('#rec-rows').insertAdjacentHTML('beforeend', recipeRow()); updateRecipeTotal(); },
+    'pur-add': () => { $('#pur-rows').insertAdjacentHTML('beforeend', purchaseRow()); },
+    'rec-del': (d, el) => { el.parentElement.remove(); updateRecipeTotal(); updatePurchaseTotal(); },
+    'sup-pay': (d) => {
+      const x = S.inv.data.suppliers.find((y) => y.id === +d.id);
+      formModal({ eyebrow: 'Supplier payment', title: `Pay ${x.name}`, submit: 'Record payment',
+        body: `<p class="muted" style="margin-top:0">Owed ${money(+d.due)}.</p>
+          <div class="two"><div><label>Amount</label><input name="amount" inputmode="decimal" required value="${(+d.due / 100).toFixed(2)}"></div>
+          <div><label>Paid by</label><select name="method">${Object.entries(PAY_LABEL).filter(([k]) => k !== 'credit').map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div></div>
+          <label>Reference</label><input name="reference" maxlength="80" placeholder="Cheque / transfer no.">
+          ${d.purchase ? `<input type="hidden" name="purchase_id" value="${d.purchase}">` : ''}`,
+        onSubmit: async (v) => {
+          await api(`/inventory/suppliers/${x.id}/payments`, { body: v });
+          S.modal = null; toast(`Payment of ${money(Math.round(v.amount * 100))} recorded${v.method === 'drawer' ? ' and taken from the cash drawer' : ''}`);
+          await loadInv(); render();
+        } });
+    },
+    'inv-reorder-receive': async (d) => {
+      const g = S.inv.reorder.find((x) => String(x.supplier_id) === d.id);
+      S.inv.section = 'purchases'; await loadInv('purchases');
+      S.inv.sel = { kind: 'purchase', id: null, prefill: { supplier_id: g.supplier_id,
+        lines: g.items.map((i) => ({ ingredient_id: i.id, unit: i.unit, qty: i.suggest, unit_cost: (i.cost_cents / 100).toFixed(2), line_total: (i.suggest * i.cost_cents / 100).toFixed(2) })) } };
+      render();
+    },
+    'inv-reorder-print': () => printSimple('REORDER LIST', S.inv.reorder.map((g) => `<b>${esc(g.supplier_name)}</b>${g.supplier_phone ? ' · ' + esc(g.supplier_phone) : ''}
+      ${g.items.map((i) => `<div class="r"><span>${esc(i.name)}</span><span>${fq(i.suggest)} ${esc(i.unit)}</span></div>`).join('')}
+      <div class="r"><span>≈ cost</span><span>${money(g.est_cents)}</span></div><hr>`).join('')),
+    'inv-count-print': () => printSimple('STOCK COUNT SHEET', S.inv.data.ingredients.filter((g) => g.active)
+      .map((g) => `<div class="r"><span>${esc(g.name)} (${esc(g.unit)})</span><span>______</span></div>`).join('') + '<br><div>Counted by: ____________</div>'),
     'confirm-yes': () => S.modal.run(),
     'close-modal': () => { S.modal = null; renderModal(); },
     overlay: () => {},
@@ -1384,6 +1766,42 @@
       const v = Object.fromEntries(new FormData(e.target).entries());
       const btn = e.target.querySelector('[type=submit]'); btn.disabled = true;
       run(async () => { try { await S.modal.onSubmit(v); } finally { if (btn.isConnected) btn.disabled = false; } })();
+    }
+    if (e.target.id === 'ing-form' || e.target.id === 'supplier-form') {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const body = { ...Object.fromEntries(f.entries()), active: f.has('active') };
+      const s0 = S.inv.sel; const path = e.target.id === 'ing-form' ? 'ingredients' : 'suppliers';
+      run(async () => {
+        const out = await api(`/inventory/${path}${s0.id ? '/' + s0.id : ''}`, { method: s0.id ? 'PATCH' : 'POST', body });
+        toast(s0.id ? 'Saved' : 'Added'); S.inv.sel = { kind: s0.kind, id: s0.id || out.id }; await loadFloor(); await loadInv(); render();
+      })();
+    }
+    if (e.target.id === 'recipe-form') {
+      e.preventDefault();
+      const lines = [...document.querySelectorAll('#rec-rows .rec-row')].map((r) => ({ ingredient_id: r.querySelector('select').value, qty: r.querySelector('[data-f="qty"]').value }))
+        .filter((l) => l.ingredient_id && l.qty);
+      run(async () => { await api(`/inventory/recipes/${S.inv.sel.id}`, { method: 'PUT', body: { lines } }); toast('Recipe saved'); await loadInv(); render(); })();
+    }
+    if (e.target.id === 'purchase-form') {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(e.target).entries());
+      const lines = [...document.querySelectorAll('#pur-rows .pur-row')].map((r) => ({ ingredient_id: r.querySelector('select').value, qty: r.querySelector('[data-f="qty"]').value,
+        unit_cost: r.querySelector('[data-f="unit"]').value, line_total: r.querySelector('[data-f="total"]').value })).filter((l) => l.ingredient_id && l.qty);
+      if (f.pay_method === 'credit') { f.pay_amount = ''; }
+      run(async () => {
+        const out = await api('/inventory/purchases', { body: { ...f, lines } });
+        toast('Goods received. Stock updated.'); S.inv.sel = { kind: 'purchase-view', id: out.id }; await loadFloor(); await loadInv(); render();
+      })();
+    }
+    if (e.target.id === 'count-form') {
+      e.preventDefault();
+      const counts = [...document.querySelectorAll('[data-count]')].filter((x) => x.value !== '').map((x) => ({ ingredient_id: x.dataset.count, counted: x.value }));
+      const note = e.target.querySelector('[name="note"]').value;
+      run(async () => {
+        const r = await api('/inventory/stocktake', { body: { counts, note } });
+        toast(`Count saved: ${r.changed} changed · short ${money(r.loss_cents)} · over ${money(r.gain_cents)}`); await loadFloor(); await loadInv(); render();
+      })();
     }
     if (e.target.id === 'shift-open-form') {
       e.preventDefault();
@@ -1426,6 +1844,8 @@
     }
   });
   document.addEventListener('change', (e) => {
+    if (e.target.closest('#rec-rows')) updateRecipeTotal();
+    if (e.target.closest('#pur-rows') && e.target.tagName === 'SELECT') updatePurchaseTotal(e.target);
     if (e.target.id === 'login-bg-file' && e.target.files[0]) {
       run(async () => {
         const blob = await resizeImage(e.target.files[0], 1920);
@@ -1447,6 +1867,13 @@
     if (e.target.id === 'admin-cat') { S.admin.cat = e.target.value; $('#admin-list').innerHTML = adminList(); }
   });
   document.addEventListener('input', (e) => {
+    if (e.target.id === 'inv-q') {
+      S.inv.q = e.target.value; const pos = e.target.selectionStart;
+      $('#inv-list').innerHTML = stockList(); const q = $('#inv-q'); q.focus(); q.setSelectionRange(pos, pos);
+    }
+    if (e.target.closest('#rec-rows')) updateRecipeTotal();
+    if (e.target.closest('#pur-rows')) updatePurchaseTotal(e.target);
+    if (e.target.dataset.count !== undefined) updateCount();
     if (e.target.dataset.denom !== undefined || e.target.id === 'counted') {
       if (e.target.dataset.denom !== undefined) {
         const sum = [...document.querySelectorAll('[data-denom]')].reduce((t, x) => t + (+x.dataset.denom) * (parseInt(x.value, 10) || 0), 0);
@@ -1503,7 +1930,7 @@
 
   // tick: clock every 15s, full re-render each minute for ages (skip while a modal or input is active)
   setInterval(() => { const c = $('#clock'); if (c && S.cfg) c.textContent = clock(Date.now()); }, 15000);
-  setInterval(() => { if (S.user && !S.modal && !['admin', 'reports', 'shift'].includes(S.tab) && document.activeElement?.tagName !== 'INPUT') render(); }, 60000);
+  setInterval(() => { if (S.user && !S.modal && !['admin', 'reports', 'shift', 'stock'].includes(S.tab) && document.activeElement?.tagName !== 'INPUT') render(); }, 60000);
 
   // ---------- boot ----------
   async function boot() {

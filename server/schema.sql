@@ -256,3 +256,84 @@ CREATE TABLE IF NOT EXISTS app_images (
   data        BYTEA NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- v8: inventory — ingredients, recipes, stock ledger, suppliers, purchases
+CREATE TABLE IF NOT EXISTS suppliers (
+  id        SERIAL PRIMARY KEY,
+  name      TEXT NOT NULL,
+  phone     TEXT,
+  email     TEXT,
+  address   TEXT,
+  notes     TEXT,
+  active    BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS ingredients (
+  id             SERIAL PRIMARY KEY,
+  name           TEXT NOT NULL UNIQUE,
+  unit           TEXT NOT NULL DEFAULT 'kg',            -- kg, g, l, ml, pcs, pack, bottle, bunch
+  stock          NUMERIC(14,3) NOT NULL DEFAULT 0,
+  reorder_level  NUMERIC(14,3) NOT NULL DEFAULT 0,      -- alert at or below this
+  par_level      NUMERIC(14,3) NOT NULL DEFAULT 0,      -- order up to this
+  cost_cents     NUMERIC(14,4) NOT NULL DEFAULT 0,      -- weighted average cost per unit
+  supplier_id    INT REFERENCES suppliers(id) ON DELETE SET NULL,
+  active         BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS recipe_items (
+  menu_item_id   INT NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
+  ingredient_id  INT NOT NULL REFERENCES ingredients(id) ON DELETE CASCADE,
+  qty            NUMERIC(12,4) NOT NULL CHECK (qty > 0),
+  PRIMARY KEY (menu_item_id, ingredient_id)
+);
+
+CREATE TABLE IF NOT EXISTS purchases (
+  id            SERIAL PRIMARY KEY,
+  supplier_id   INT REFERENCES suppliers(id),
+  invoice_no    TEXT,
+  invoice_date  DATE NOT NULL DEFAULT CURRENT_DATE,
+  due_date      DATE,
+  total_cents   INT NOT NULL DEFAULT 0,
+  notes         TEXT,
+  staff_id      INT REFERENCES staff(id),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS purchase_items (
+  id               SERIAL PRIMARY KEY,
+  purchase_id      INT NOT NULL REFERENCES purchases(id) ON DELETE CASCADE,
+  ingredient_id    INT NOT NULL REFERENCES ingredients(id),
+  qty              NUMERIC(14,3) NOT NULL CHECK (qty > 0),
+  unit_cost_cents  NUMERIC(14,4) NOT NULL,
+  line_cents       INT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS supplier_payments (
+  id            SERIAL PRIMARY KEY,
+  supplier_id   INT NOT NULL REFERENCES suppliers(id),
+  purchase_id   INT REFERENCES purchases(id) ON DELETE SET NULL,
+  amount_cents  INT NOT NULL CHECK (amount_cents > 0),
+  method        TEXT NOT NULL CHECK (method IN ('drawer','cash','bank','card','cheque')),
+  reference     TEXT,
+  staff_id      INT REFERENCES staff(id),
+  cash_movement_id INT REFERENCES cash_movements(id),
+  paid_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- every stock change, with its value at the time (for cost of goods sold and waste reports)
+CREATE TABLE IF NOT EXISTS stock_moves (
+  id             SERIAL PRIMARY KEY,
+  ingredient_id  INT NOT NULL REFERENCES ingredients(id) ON DELETE CASCADE,
+  kind           TEXT NOT NULL CHECK (kind IN ('sale','purchase','waste','count','adjust','opening')),
+  change         NUMERIC(14,3) NOT NULL,
+  stock_after    NUMERIC(14,3) NOT NULL,
+  value_cents    INT NOT NULL DEFAULT 0,          -- |change| × cost at the time
+  order_id       INT REFERENCES orders(id) ON DELETE SET NULL,
+  purchase_id    INT REFERENCES purchases(id) ON DELETE SET NULL,
+  note           TEXT,
+  staff_id       INT REFERENCES staff(id),
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS stock_moves_ing_idx ON stock_moves(ingredient_id, id DESC);
+CREATE INDEX IF NOT EXISTS stock_moves_created_idx ON stock_moves(created_at);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_deducted BOOLEAN NOT NULL DEFAULT FALSE;

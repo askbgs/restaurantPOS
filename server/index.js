@@ -5,6 +5,7 @@ const { pool, tx, migrate, hashPin, checkPin, startListener, notify, listeners }
 const adminRouter = require('./admin');
 const createPrinting = require('./printing');
 const reportsRouter = require('./reports');
+const createInventory = require('./inventory');
 
 const CONFIG = {
   restaurant: process.env.RESTAURANT_NAME || 'Ember & Bao',
@@ -137,6 +138,7 @@ async function openShift(c) {
 }
 
 const printing = createPrinting({ pool, tx, listeners, CONFIG, wrap, HttpError });
+const inventory = createInventory({ pool, tx, wrap, HttpError, audit, notify });
 app.use('/bridge', printing.bridge);
 
 // ---------- auth ----------
@@ -195,6 +197,7 @@ app.get('/api/me', (req, res) => res.json(req.user));
 app.use('/api/admin', adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError, CONFIG, ENV_CONFIG, loadSettings, audit }));
 app.use('/api/admin/printing', printing.admin);
 app.use('/api/reports', reportsRouter({ pool, wrap, HttpError, CONFIG }));
+app.use('/api/inventory', inventory.router);
 app.post('/api/logout', wrap(async (req, res) => {
   await pool.query('DELETE FROM sessions WHERE token=$1', [req.token]);
   res.setHeader('Set-Cookie', 'pos_session=; Path=/; Max-Age=0');
@@ -215,7 +218,7 @@ app.get('/api/events', (req, res) => {
 app.get('/api/menu', wrap(async (req, res) => {
   const { rows: categories } = await pool.query('SELECT * FROM categories ORDER BY sort, id');
   const { rows: items } = await pool.query(
-    `SELECT m.*, st.name AS station_name, st.code AS station_code,
+    `SELECT m.*, st.name AS station_name, st.code AS station_code, ${inventory.STOCK_OUT_SQL} AS stock_out,
        coalesce((SELECT json_agg(json_build_object('id',a.id,'name',a.name,'price_cents',a.price_cents) ORDER BY a.id)
                  FROM item_addons a WHERE a.item_id=m.id), '[]') AS addons
      FROM menu_items m JOIN stations st ON st.id=m.station_id WHERE m.active ORDER BY m.sort, m.id`);
@@ -240,7 +243,8 @@ app.get('/api/floor', wrap(async (req, res) => {
     total_cents: o.total_cents, status: o.display_status }));
   const { rows: [counts] } = await pool.query(
     `SELECT (SELECT count(*)::int FROM kots WHERE status IN ('held','new','cooking','ready')) AS live_tickets,
-            (SELECT count(*)::int FROM orders WHERE status='paid' AND closed_at::date = (now() AT TIME ZONE $1)::date) AS closed_today`,
+            (SELECT count(*)::int FROM orders WHERE status='paid' AND closed_at::date = (now() AT TIME ZONE $1)::date) AS closed_today,
+            (SELECT count(*)::int FROM ingredients WHERE active AND stock <= reorder_level) AS stock_alerts`,
     [CONFIG.timezone]);
   const seated = outTables.filter((t) => t.order);
   res.json({
@@ -478,6 +482,7 @@ app.post('/api/orders/:id/pay', wrap(async (req, res) => {
     const t = await saveTotals(c, id);
     if (t.total_cents <= 0) bad('Order total is zero');
     await c.query("UPDATE orders SET status='paid', payment_method=$2, closed_at=now(), shift_id=$3 WHERE id=$1", [id, method, shift.id]);
+    await inventory.deductForOrder(c, id, req.user.id); // recipe ingredients come out of stock
   });
   notify(kitchenTouched ? 'kitchen' : 'floor');
   res.json(await loadOrder(id));

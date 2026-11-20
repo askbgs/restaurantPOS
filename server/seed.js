@@ -30,4 +30,11 @@ module.exports = async function seed(pool, hashPin) {
   // Kitchen stations + Asian sample menu (shared with Admin → "Load Asian menu")
   await require('./menu-data').loadMenu(pool);
   await q("INSERT INTO settings(key, value) VALUES ('terminal', 'Asian Cuisine') ON CONFLICT (key) DO NOTHING");
+  // Sample suppliers, ingredients with opening stock, and recipes
+  const move = async (c, { ingredientId, kind, change, note }) => {
+    const { rows: [g] } = await c.query('UPDATE ingredients SET stock = stock + $2 WHERE id=$1 RETURNING stock, cost_cents', [ingredientId, change]);
+    await c.query('INSERT INTO stock_moves(ingredient_id, kind, change, stock_after, value_cents, note) VALUES ($1,$2,$3,$4,$5,$6)',
+      [ingredientId, kind, change, g.stock, Math.round(Math.abs(change) * g.cost_cents), note]);
+  };
+  await require('./inventory-sample').load(pool, { move, staffId: null });
 };

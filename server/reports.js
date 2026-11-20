@@ -26,6 +26,7 @@ module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG }) {
 
     const [
       [k], [ref], [vd], [vo], byHour, byDay, byType, byPay, refByMethod, byCat, items, slow, staff, tables, voids, refunds, discounts,
+      [stk], dishCost, wasteList,
     ] = await Promise.all([
       q(`SELECT count(*)::int AS orders, coalesce(sum(total_cents),0)::bigint AS gross_cents, coalesce(sum(subtotal_cents),0)::bigint AS subtotal_cents,
                 coalesce(sum(discount_cents),0)::bigint AS discount_cents, coalesce(sum(service_cents),0)::bigint AS service_cents,
@@ -73,6 +74,24 @@ module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG }) {
          WHERE ${inRange('r.created_at')} ORDER BY r.id DESC LIMIT 200`),
       q(`SELECT discount_pct AS pct, count(*)::int AS orders, coalesce(sum(discount_cents),0)::bigint AS cents
          FROM orders o WHERE ${PAID} AND discount_pct > 0 GROUP BY 1 ORDER BY 1`),
+      // stock: cost of what was sold (valued when sold), waste, count differences, purchases
+      q(`SELECT coalesce(sum(value_cents) FILTER (WHERE kind='sale'),0)::bigint AS cogs_cents,
+                coalesce(sum(value_cents) FILTER (WHERE kind='waste'),0)::bigint AS waste_cents,
+                coalesce(sum(value_cents) FILTER (WHERE kind='count' AND change < 0),0)::bigint AS count_loss_cents,
+                coalesce(sum(value_cents) FILTER (WHERE kind='count' AND change > 0),0)::bigint AS count_gain_cents,
+                (SELECT coalesce(sum(total_cents),0) FROM purchases p WHERE p.invoice_date BETWEEN $2::date AND $3::date)::bigint AS purchases_cents,
+                (SELECT count(*) FROM recipe_items)::int AS recipe_lines
+         FROM stock_moves m WHERE ${inRange('m.created_at')}`),
+      // profit per dish: sales vs. current recipe cost
+      q(`SELECT i.name, sum(i.qty - i.void_qty)::int AS qty, sum(${LINE})::bigint AS cents,
+                coalesce(max(rc.cost),0)::numeric AS unit_cost, bool_or(rc.cost IS NOT NULL) AS has_recipe
+         FROM order_items i JOIN orders o ON o.id=i.order_id
+         LEFT JOIN (SELECT r.menu_item_id, sum(r.qty * g.cost_cents) AS cost FROM recipe_items r JOIN ingredients g ON g.id=r.ingredient_id GROUP BY 1) rc
+           ON rc.menu_item_id=i.menu_item_id
+         WHERE ${PAID} GROUP BY i.name HAVING sum(i.qty - i.void_qty) > 0 ORDER BY 3 DESC`),
+      q(`SELECT m.created_at, g.name, g.unit, -m.change AS qty, m.value_cents, m.note, s.name AS staff_name
+         FROM stock_moves m JOIN ingredients g ON g.id=m.ingredient_id LEFT JOIN staff s ON s.id=m.staff_id
+         WHERE m.kind='waste' AND ${inRange('m.created_at')} ORDER BY m.id DESC LIMIT 100`),
     ]);
 
     const n = (v) => Number(v);
@@ -104,6 +123,22 @@ module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG }) {
       discounts: discounts.map((x) => ({ ...x, cents: n(x.cents) })),
       voids: voids.map((x) => ({ ...x, amount_cents: n(x.amount_cents) })),
       refunds: refunds.map((x) => ({ ...x, amount_cents: n(x.amount_cents) })),
+      stock: (() => {
+        const food = kpi.subtotal_cents - kpi.discount_cents; // food & drink sales before service charge and tax
+        const cogs = n(stk.cogs_cents);
+        return {
+          food_sales_cents: food, cogs_cents: cogs, gross_profit_cents: food - cogs,
+          food_cost_pct: food ? Math.round((cogs / food) * 1000) / 10 : null,
+          waste_cents: n(stk.waste_cents), count_loss_cents: n(stk.count_loss_cents), count_gain_cents: n(stk.count_gain_cents),
+          purchases_cents: n(stk.purchases_cents), has_recipes: stk.recipe_lines > 0,
+        };
+      })(),
+      dish_profit: dishCost.map((x) => {
+        const cost = Math.round(n(x.unit_cost) * x.qty);
+        return { name: x.name, qty: x.qty, cents: n(x.cents), cost_cents: x.has_recipe ? cost : null,
+          profit_cents: x.has_recipe ? n(x.cents) - cost : null, margin_pct: x.has_recipe && n(x.cents) ? Math.round(((n(x.cents) - cost) / n(x.cents)) * 1000) / 10 : null };
+      }),
+      waste: wasteList.map((x) => ({ ...x, value_cents: n(x.value_cents) })),
     });
   }));
 

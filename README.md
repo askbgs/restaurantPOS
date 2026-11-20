@@ -49,6 +49,19 @@ Admin safeguards:
 - **Per order line:** tap **No KOT** on an unsent line, or choose **Already prepared** in the Options box, when a dish is already cooked.
 - These items are billed and reported like any other. Once served, removing one needs a Manager-approved **Void**, the same as a sent item. Each per-line "No KOT" is recorded in the audit log.
 
+### Stock, recipes & suppliers (Stock tab, Managers)
+- **Stock levels:** ingredients with a unit (kg, g, l, ml, pcs, pack, bottle, bunch), current stock, reorder level, order-up-to level, weighted average cost, value and usual supplier. Each ingredient shows its full stock history. **Record waste** or **Adjust** with a reason.
+- **Recipes & cost:** what goes into one portion of each dish, with live cost, food-cost % and profit as you type. The list flags dishes with no recipe, dishes over 35% food cost, and how many portions current stock can make.
+- **Stock comes off when a bill is paid:** recipe quantity × quantity sold. Voided items are excluded. Add-ons are not deducted.
+- **Low stock:** the Stock tab shows how many items need reordering. Dishes whose ingredients have run out show **Low on ingredients** on the Order screen. This is a warning only and doesn't block the sale.
+- **Reorder list:** low items grouped by supplier, with suggested amounts (up to the order-up-to level) and an estimated cost. Print it, or press **Receive this order** to get a pre-filled delivery form.
+- **Receive goods:** record each delivery with supplier, invoice no., date and lines (enter either the unit cost or the line total). Stock goes up and the average cost is recalculated. Pay now or on credit, by cash from the drawer (it is taken out of the open shift's cash and can't exceed the cash that should be in the drawer), other cash, bank, card or cheque.
+- **Suppliers:** contact details, total bought, paid and the **balance owed**, recent deliveries, and **Record payment**.
+- **Stock count:** enter what's on the shelves. Only filled rows change, and each difference is recorded with its value. You can print a blank count sheet.
+- **Reports:** a *Food cost & stock* section with food sales, cost of ingredients used, food cost %, gross profit, waste, count differences and goods received, plus *Profit by dish* and a *Waste* list (also in the CSV).
+- **Sample data:** new installs start with 36 ingredients, 4 suppliers and recipes for 32 dishes. Existing installs get a **Load sample ingredients & recipes** button while the stock list is empty.
+- Every delivery, payment, waste, adjustment, count and recipe change goes into the audit log.
+
 ### Voids, refunds and manager approval
 - **Before a dish is sent**, staff can remove it freely with −.
 - **After it's sent**, **Void** on the line needs a reason and a Manager PIN. A Manager doesn't need to enter a PIN. The kitchen gets a VOID slip, and the bill total updates.
@@ -127,7 +140,9 @@ How totals are calculated: subtotal − discount = base. Service, tax and tip ar
 server/index.js    Express API, auth, SSE, static hosting
 server/admin.js    manager-only admin API + audit log
 server/printing.js print queue, receipt layouts, bridge API
-server/reports.js  sales reports
+server/reports.js  sales + food-cost reports
+server/inventory.js  ingredients, recipes, stock ledger, suppliers, purchases
+server/inventory-sample.js  sample ingredients and recipes
 bridge/print-bridge.js  runs on a shop PC, sends ESC/POS to printers
 server/db.js       pg pool, migrations, LISTEN/NOTIFY, PIN hashing
 server/schema.sql  tables (staff, areas, dining_tables, stations, categories,
@@ -139,4 +154,6 @@ public/            web app (index.html, app.js, styles.css) — no build step
 ## Not included yet
 
 - Sinhala and Tamil text on thermal printers. The printer code page is ASCII, so those characters print as '?'.
-- Reports beyond today's history.
+- Add-ons (extra cheese, fried egg…) don't deduct stock. Only the dish recipe does.
+- Unit conversion between purchase and recipe units. Each ingredient uses one unit (e.g. buy and use chicken in kg).
+- Editing or cancelling a saved delivery. Correct mistakes with a stock adjustment and a supplier payment.
