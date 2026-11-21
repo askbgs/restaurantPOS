@@ -89,4 +89,4 @@ if (body.event === 'shift.closed') {
   return [{ json: { send: false, code: 200, error: null, skipped: body.event } }];
 }
 
-return [{ json: { send: true, code: 200, to, subject, html, text, event: body.event, event_id: body.id } }];
+return [{ json: { send: true, code: 200, to, subject, html, text, event: body.event, event_id: body.id, restaurant: src.restaurant || 'Restaurant' } }];
