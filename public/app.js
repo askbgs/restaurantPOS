@@ -408,7 +408,10 @@
           <div class="muted">Opened ${clock(o.opened_at)} · ${mins(o.opened_at)} min · ${esc(o.staff_name || '')}${o.bill_printed_at ? ` · Bill printed ${clock(o.bill_printed_at)}` : ''}</div>
           ${pending.length ? `<div class="warn"><span>${pending.length} item${pending.length > 1 ? 's have' : ' has'} not been sent to the kitchen. Charging sends ${pending.length > 1 ? 'them' : 'it'} automatically.</span>
             <button type="button" data-act="tab" data-tab="order">Back to order</button></div>` : '<div style="height:22px"></div>'}
-          <div class="blines">${o.items.filter((i) => eq(i) > 0).map((i) => `<div class="bline"><span>${eq(i)}</span><span>${esc(i.name)}${modsHtml(i) ? `<small>${modsHtml(i)}</small>` : ''}</span><span>${money(lineTotal(i))}</span></div>`).join('') || '<div class="empty">No items yet.</div>'}</div>
+          <div class="blines">${o.items.filter((i) => eq(i) > 0).map((i) => `<div class="bline-group">
+              <div class="bline"><span>${eq(i)}</span><span>${esc(i.name)}${i.spice ? `<small>Spice: ${esc(i.spice)}</small>` : ''}</span><span>${money(eq(i) * i.unit_price_cents)}</span></div>
+              ${(i.addons || []).map((a) => `<div class="bline addon"><span></span><span>+ ${esc(a.name)}${eq(i) > 1 ? ` ×${eq(i)}` : ''}</span><span>${money(eq(i) * a.price_cents)}</span></div>`).join('')}
+            </div>`).join('') || '<div class="empty">No items yet.</div>'}</div>
           <div class="bsum" style="margin-top:14px">
             <div class="r"><span>Subtotal</span><span>${money(o.subtotal_cents)}</span></div>
             ${o.discount_cents ? `<div class="r"><span>Discount ${o.discount_pct}%</span><span>−${money(o.discount_cents)}</span></div>` : ''}
@@ -1479,6 +1482,14 @@
     return [...groups.values()];
   }
 
+  // One bill line: the dish at its own price, then each add-on with its price (they add up to the subtotal)
+  const billLinesHtml = (r) => (i) => {
+    const q = eq(i);
+    return r(`${q} x ${esc(i.name)}`, money(q * i.unit_price_cents))
+      + (i.spice ? `<div class="mod">&nbsp;&nbsp;&nbsp;&nbsp;Spice: ${esc(i.spice)}</div>` : '')
+      + (i.addons || []).map((a) => r(`&nbsp;&nbsp;&nbsp;&nbsp;+ ${esc(a.name)}${q > 1 ? ` x${q}` : ''}`, money(q * a.price_cents))).join('');
+  };
+
   // Header for browser-printed bills (and the preview in Settings)
   function billHeaderHtml(c = S.cfg) {
     const lines = String(c.address || '').split('\n').filter(Boolean);
@@ -1533,7 +1544,7 @@
       <div>Server: ${esc(o.staff_name || '')}${o.type === 'dinein' ? ` · Guests: ${o.guests}` : ''}</div>
       ${o.customer_name ? `<div>Customer: ${esc(o.customer_name)}</div>` : ''}${o.phone ? `<div>Contact: ${esc(o.phone)}</div>` : ''}
       ${o.type === 'delivery' && o.address ? `<div>Deliver to: ${esc(o.address)}</div>` : ''}<hr>
-      ${o.items.filter((i) => eq(i) > 0).map((i) => r(`${eq(i)} x ${esc(i.name)}`, money(lineTotal(i)))).join('')}<hr>
+      ${o.items.filter((i) => eq(i) > 0).map(billLinesHtml(r)).join('')}<hr>
       ${r('Subtotal', money(o.subtotal_cents))}
       ${o.discount_cents ? r(`Discount ${o.discount_pct}%`, '-' + money(o.discount_cents)) : ''}
       ${o.service_on ? r(`Service ${pct(S.cfg.serviceRate)}`, money(o.service_cents)) : ''}

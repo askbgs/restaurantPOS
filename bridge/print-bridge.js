@@ -39,15 +39,21 @@ const clean = (s) => String(s ?? '').replace(/[^\x20-\x7e]/g, (ch) => (ch in ASC
 
 function wrap(text, width) {
   const out = [];
-  for (const para of clean(text).split('\n')) {
+  for (const raw of clean(text).split('\n')) {
+    // keep leading indentation (e.g. "    Spice: Hot"), wrap the rest
+    const indent = raw.match(/^ */)[0].slice(0, Math.floor(width / 2));
+    const para = raw.slice(indent.length);
+    const w = width - indent.length;
+    const start = out.length;
     let line = '';
     for (const word of para.split(' ')) {
       if (!line) line = word;
-      else if ((line + ' ' + word).length <= width) line += ' ' + word;
+      else if ((line + ' ' + word).length <= w) line += ' ' + word;
       else { out.push(line); line = word; }
-      while (line.length > width) { out.push(line.slice(0, width)); line = line.slice(width); }
+      while (line.length > w) { out.push(line.slice(0, w)); line = line.slice(w); }
     }
     out.push(line);
+    for (let k = start; k < out.length; k++) out[k] = indent + out[k];
   }
   return out;
 }

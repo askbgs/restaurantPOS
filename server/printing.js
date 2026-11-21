@@ -103,8 +103,12 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
     for (const i of o.items) {
       const q = i.qty - (i.void_qty || 0);
       if (q <= 0) continue;
-      d.push({ t: 'row', l: `${q} x ${i.name}`, r: money(q * (i.unit_price_cents + i.addons_cents)) });
-      if (mods(i)) d.push({ t: 'text', s: `    ${mods(i)}` });
+      // dish at its own price, then each add-on with its price, so the lines add up to the subtotal
+      d.push({ t: 'row', l: `${q} x ${i.name}`, r: money(q * i.unit_price_cents) });
+      if (i.spice) d.push({ t: 'text', s: `    Spice: ${i.spice}` });
+      for (const a of i.addons || []) {
+        d.push({ t: 'row', l: `    + ${a.name}${q > 1 ? ` x${q}` : ''}`, r: money(q * a.price_cents) });
+      }
     }
     d.push({ t: 'hr' }, { t: 'row', l: 'Subtotal', r: money(o.subtotal_cents) });
     if (o.discount_cents) d.push({ t: 'row', l: `Discount ${o.discount_pct}%`, r: '-' + money(o.discount_cents) });
