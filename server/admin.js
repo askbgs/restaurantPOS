@@ -70,7 +70,7 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     const [categories, items, areas, tables, stations, staff] = await Promise.all([
       pool.query(`SELECT c.*, (SELECT count(*)::int FROM menu_items m WHERE m.category_id=c.id) AS item_count
                   FROM categories c ORDER BY sort, id`),
-      pool.query(`SELECT m.*, coalesce((SELECT json_agg(json_build_object('id',a.id,'name',a.name,'price_cents',a.price_cents) ORDER BY a.id)
+      pool.query(`SELECT m.*, coalesce((SELECT json_agg(json_build_object('id',a.id,'name',a.name,'price_cents',a.price_cents,'unit',a.unit,'max_qty',a.max_qty) ORDER BY a.id)
                     FROM item_addons a WHERE a.item_id=m.id), '[]') AS addons
                   FROM menu_items m ORDER BY m.category_id, m.sort, m.id`),
       pool.query(`SELECT a.*, (SELECT count(*)::int FROM dining_tables t WHERE t.area_id=a.id) AS table_count FROM areas a ORDER BY sort, id`),
@@ -196,8 +196,10 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     if (!Number.isFinite(price) || price < 0) bad('Enter a valid price');
     const addons = (Array.isArray(b.addons) ? b.addons : []).map((a) => ({
       name: str(a.name, 60), price_cents: Math.round(Number(a.price || 0) * 100),
+      unit: str(a.unit, 20) || null, max_qty: a.max_qty === undefined || a.max_qty === '' ? 5 : int(a.max_qty),
     })).filter((a) => a.name);
     if (addons.some((a) => !Number.isFinite(a.price_cents) || a.price_cents < 0)) bad('Enter valid add-on prices');
+    if (addons.some((a) => !(a.max_qty >= 1 && a.max_qty <= 20))) bad('Add-on max quantity must be 1–20');
     return {
       name: need(str(b.name, 80), 'Name'),
       category_id: need(int(b.category_id), 'Category'),
@@ -213,7 +215,9 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
   };
   async function saveAddons(c, itemId, addons) {
     await c.query('DELETE FROM item_addons WHERE item_id=$1', [itemId]);
-    for (const a of addons) await c.query('INSERT INTO item_addons(item_id, name, price_cents) VALUES ($1,$2,$3)', [itemId, a.name, a.price_cents]);
+    for (const a of addons) {
+      await c.query('INSERT INTO item_addons(item_id, name, price_cents, unit, max_qty) VALUES ($1,$2,$3,$4,$5)', [itemId, a.name, a.price_cents, a.unit, a.max_qty]);
+    }
   }
   // "Spice level" tag is managed by the has_spice switch
   const tagsFor = (m) => m.tags.filter((t) => t.toLowerCase() !== 'spice level').concat(m.has_spice ? ['Spice level'] : []);

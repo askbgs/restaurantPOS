@@ -54,7 +54,12 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
     if (terminal && CONFIG.terminal) d.push({ t: 'text', s: CONFIG.terminal, align: 'center' });
     return d;
   }
-  const mods = (i) => [i.spice, ...(i.addons || []).map((a) => '+ ' + a.name)].filter(Boolean).join(', ');
+  // Add-on wording: "Boiled egg", "Boiled egg x2 pieces", "Extra rice x2 portions". Older lines have no qty (= 1).
+  const aq = (a) => a.qty || 1;
+  const unitWord = (u, n) => (n === 1 || /s$/i.test(u) ? u : u + 's');
+  const addonLabel = (a, n) => (n === 1 ? a.name : `${a.name} x${n}${a.unit ? ' ' + unitWord(a.unit, n) : ''}`);
+  // On the kitchen ticket the add-on count is per dish; "each" makes that clear when the dish qty is above 1.
+  const mods = (i) => [i.spice, ...(i.addons || []).map((a) => '+ ' + addonLabel(a, aq(a)) + (aq(a) > 1 && i.qty - (i.void_qty || 0) > 1 ? ' each' : ''))].filter(Boolean).join(', ');
 
   function kotDoc({ kot, order, items, staffName, flag }) {
     const d = [
@@ -107,7 +112,7 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
       d.push({ t: 'row', l: `${q} x ${i.name}`, r: money(q * i.unit_price_cents) });
       if (i.spice) d.push({ t: 'text', s: `    Spice: ${i.spice}` });
       for (const a of i.addons || []) {
-        d.push({ t: 'row', l: `    + ${a.name}${q > 1 ? ` x${q}` : ''}`, r: money(q * a.price_cents) });
+        d.push({ t: 'row', l: `    + ${addonLabel(a, q * aq(a))}`, r: money(q * aq(a) * a.price_cents) });
       }
     }
     d.push({ t: 'hr' }, { t: 'row', l: 'Subtotal', r: money(o.subtotal_cents) });

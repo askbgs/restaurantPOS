@@ -346,3 +346,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS card_auth TEXT;
 -- v10: cash payments record the cash handed over and the change given
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cash_received_cents INT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS change_cents INT;
+
+-- v11: add-on quantities — each add-on has a unit (portion, piece…) and a max per dish
+ALTER TABLE item_addons ADD COLUMN IF NOT EXISTS unit TEXT;
+ALTER TABLE item_addons ADD COLUMN IF NOT EXISTS max_qty INT NOT NULL DEFAULT 5;

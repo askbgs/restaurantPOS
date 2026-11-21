@@ -256,7 +256,7 @@ app.get('/api/menu', wrap(async (req, res) => {
   const { rows: categories } = await pool.query('SELECT * FROM categories ORDER BY sort, id');
   const { rows: items } = await pool.query(
     `SELECT m.*, st.name AS station_name, st.code AS station_code, ${inventory.STOCK_OUT_SQL} AS stock_out,
-       coalesce((SELECT json_agg(json_build_object('id',a.id,'name',a.name,'price_cents',a.price_cents) ORDER BY a.id)
+       coalesce((SELECT json_agg(json_build_object('id',a.id,'name',a.name,'price_cents',a.price_cents,'unit',a.unit,'max_qty',a.max_qty) ORDER BY a.id)
                  FROM item_addons a WHERE a.item_id=m.id), '[]') AS addons
      FROM menu_items m JOIN stations st ON st.id=m.station_id WHERE m.active ORDER BY m.sort, m.id`);
   const { rows: stations } = await pool.query('SELECT * FROM stations ORDER BY sort, id');
@@ -358,10 +358,23 @@ app.post('/api/orders/:id/items', wrap(async (req, res) => {
     const { rows: [m] } = await c.query(
       'SELECT m.*, c.default_course FROM menu_items m JOIN categories c ON c.id=m.category_id WHERE m.id=$1 AND m.active', [int(req.body.menu_item_id)]);
     if (!m) bad('Dish not found');
-    const addonIds = (req.body.addon_ids || []).map(int).filter(Boolean);
-    const { rows: addons } = addonIds.length
-      ? await c.query('SELECT id, name, price_cents FROM item_addons WHERE item_id=$1 AND id = ANY($2)', [m.id, addonIds])
+    // Add-ons with a quantity per dish: [{ id, qty }] (addon_ids = qty 1 each, for older terminals)
+    const want = new Map();
+    for (const a of Array.isArray(req.body.addons) ? req.body.addons : []) {
+      const aid = int(a && a.id), aq = int(a && a.qty);
+      if (aid && aq > 0) want.set(aid, aq);
+    }
+    for (const aid of (req.body.addon_ids || []).map(int).filter(Boolean)) if (!want.has(aid)) want.set(aid, 1);
+    const addonIds = [...want.keys()];
+    const { rows: addonRows } = addonIds.length
+      ? await c.query('SELECT id, name, price_cents, unit, max_qty FROM item_addons WHERE item_id=$1 AND id = ANY($2) ORDER BY id', [m.id, addonIds])
       : { rows: [] };
+    if (addonRows.length !== addonIds.length) bad('An add-on is no longer available for this dish');
+    const addons = addonRows.map((a) => {
+      const q = want.get(a.id);
+      if (q > a.max_qty) bad(`${a.name}: at most ${a.max_qty} per dish`);
+      return { id: a.id, name: a.name, price_cents: a.price_cents, qty: q, ...(a.unit ? { unit: a.unit } : {}) };
+    });
     const course = ['drink', 'starter', 'main', 'dessert'].includes(req.body.course) ? req.body.course : m.default_course;
     const spice = m.has_spice && req.body.spice && req.body.spice !== 'Standard' ? String(req.body.spice).slice(0, 20) : null;
     const note = req.body.note ? String(req.body.note).slice(0, 200) : null;
@@ -378,7 +391,7 @@ app.post('/api/orders/:id/items', wrap(async (req, res) => {
       await c.query(
         `INSERT INTO order_items(order_id, menu_item_id, station_id, name, qty, unit_price_cents, addons, addons_cents, spice, course, note, served_direct, done)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)`,
-        [id, m.id, m.station_id, m.name, qty, m.price_cents, JSON.stringify(addons), addons.reduce((s, a) => s + a.price_cents, 0), spice, course, note, direct]);
+        [id, m.id, m.station_id, m.name, qty, m.price_cents, JSON.stringify(addons), addons.reduce((s, a) => s + a.price_cents * a.qty, 0), spice, course, note, direct]);
     }
     await saveTotals(c, id);
     return id;

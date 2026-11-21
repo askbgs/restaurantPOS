@@ -36,6 +36,10 @@
   const CARD_BRANDS = ['Visa', 'Mastercard', 'Amex', 'UnionPay', 'JCB', 'Other'];
   const isPending = (i) => !i.kot_id && !i.served_direct;
   const lineTotal = (i) => (i.qty - (i.void_qty || 0)) * (i.unit_price_cents + i.addons_cents);
+  // Add-on quantity per dish (older lines have none = 1) and its wording: "Boiled egg x2 pieces"
+  const aq = (a) => a.qty || 1;
+  const unitWord = (u, n) => (n === 1 || /s$/i.test(u) ? u : u + 's');
+  const addonLabel = (a, n) => (n === 1 ? a.name : `${a.name} x${n}${a.unit ? ' ' + unitWord(a.unit, n) : ''}`);
 
   function toast(msg, err) {
     const t = document.createElement('div');
@@ -331,7 +335,7 @@
   function modsHtml(i) {
     const parts = [];
     if (i.spice) parts.push(esc(i.spice));
-    for (const a of i.addons || []) parts.push('+ ' + esc(a.name));
+    for (const a of i.addons || []) parts.push('+ ' + esc(addonLabel(a, aq(a))) + (aq(a) > 1 && i.qty - (i.void_qty || 0) > 1 ? ' each' : ''));
     let h = parts.join(' · ');
     if (i.note) h += `${h ? ' · ' : ''}<span class="note">! ${esc(i.note)}</span>`;
     return h;
@@ -410,7 +414,7 @@
             <button type="button" data-act="tab" data-tab="order">Back to order</button></div>` : '<div style="height:22px"></div>'}
           <div class="blines">${o.items.filter((i) => eq(i) > 0).map((i) => `<div class="bline-group">
               <div class="bline"><span>${eq(i)}</span><span>${esc(i.name)}${i.spice ? `<small>Spice: ${esc(i.spice)}</small>` : ''}</span><span>${money(eq(i) * i.unit_price_cents)}</span></div>
-              ${(i.addons || []).map((a) => `<div class="bline addon"><span></span><span>+ ${esc(a.name)}${eq(i) > 1 ? ` ×${eq(i)}` : ''}</span><span>${money(eq(i) * a.price_cents)}</span></div>`).join('')}
+              ${(i.addons || []).map((a) => `<div class="bline addon"><span></span><span>+ ${esc(addonLabel(a, eq(i) * aq(a)))}</span><span>${money(eq(i) * aq(a) * a.price_cents)}</span></div>`).join('')}
             </div>`).join('') || '<div class="empty">No items yet.</div>'}</div>
           <div class="bsum" style="margin-top:14px">
             <div class="r"><span>Subtotal</span><span>${money(o.subtotal_cents)}</span></div>
@@ -530,7 +534,9 @@
   const sel = (name, opts, cur) => `<select name="${name}">${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
   const check = (name, on, label) => `<label class="check"><input type="checkbox" name="${name}" ${on ? 'checked' : ''}> ${label}</label>`;
   const addonRow = (a = {}) => `<div class="addon-row"><input data-f="name" placeholder="Add-on name" value="${esc(a.name || '')}">
-    <input data-f="price" inputmode="decimal" placeholder="0.00" value="${a.price_cents != null ? major(a.price_cents) : ''}">
+    <input data-f="price" inputmode="decimal" placeholder="0.00" title="Price for one" value="${a.price_cents != null ? major(a.price_cents) : ''}">
+    <input data-f="unit" list="addon-units" placeholder="Unit" title="Portion, piece, cup… (optional)" value="${esc(a.unit || '')}">
+    <input data-f="max" inputmode="numeric" placeholder="5" title="Most a guest can add per dish" value="${a.max_qty != null ? a.max_qty : ''}">
     <button type="button" data-act="admin-addon-del" title="Remove">✕</button></div>`;
 
   function imgPreview(rec) {
@@ -579,7 +585,11 @@
                <div class="img-actions"><label class="btn" style="cursor:pointer">Choose photo<input type="file" id="img-file" accept="image/*" hidden></label>
                  <button type="button" class="link-red" data-act="admin-img-remove">Remove photo</button>
                  <small class="muted">Resized to 800 px before upload.</small></div></div></div>`
-        + `<div class="field"><label>Add-ons</label><div id="addons">${rec.addons.map(addonRow).join('')}</div>
+        + `<div class="field"><label>Add-ons</label>
+             <div class="addon-row addon-head"><span>Name</span><span>Price (each)</span><span>Unit</span><span>Max</span><span></span></div>
+             <div id="addons">${rec.addons.map(addonRow).join('')}</div>
+             <datalist id="addon-units"><option value="portion"><option value="piece"><option value="cup"><option value="scoop"><option value="plate"><option value="bowl"></datalist>
+             <small class="muted" style="display:block;margin:2px 0 6px">The cashier picks how many (up to Max) per dish. Unit shows on bills, e.g. "Boiled egg x2 pieces".</small>
              <button type="button" class="link-red" data-act="admin-addon-add">+ Add add-on</button></div>`;
     } else if (s.kind === 'category') {
       rec = find(D.categories) || { name: '', default_course: 'main', sort: D.categories.length };
@@ -768,7 +778,8 @@
     if (f.querySelector('[name="active"]')) body.active = fd.has('active');
     if (f.querySelector('[name="send_kot"]')) body.send_kot = fd.has('send_kot');
     if (S.admin.sel.kind === 'item') {
-      body.addons = [...f.querySelectorAll('.addon-row')].map((r) => ({ name: r.querySelector('[data-f="name"]').value, price: r.querySelector('[data-f="price"]').value || 0 }));
+      body.addons = [...f.querySelectorAll('#addons .addon-row')].map((r) => ({ name: r.querySelector('[data-f="name"]').value, price: r.querySelector('[data-f="price"]').value || 0,
+        unit: r.querySelector('[data-f="unit"]').value, max_qty: r.querySelector('[data-f="max"]').value }));
     }
     return body;
   }
@@ -1418,14 +1429,18 @@
     let html = '';
     if (m.kind === 'options') {
       const i = m.item;
-      const price = (i.price_cents + i.addons.filter((a) => m.addons.has(a.id)).reduce((s, a) => s + a.price_cents, 0)) * m.qty;
+      const price = (i.price_cents + i.addons.reduce((s, a) => s + a.price_cents * (m.addons.get(a.id) || 0), 0)) * m.qty;
       html = `<div class="modal">
         <div class="modal-head"><div><div class="eyebrow">${esc(m.catName)} · ${esc(i.station_name)} station · ${money(i.price_cents)}</div><h2>${esc(i.name)}</h2></div></div>
         <div class="modal-body">
           ${i.has_spice ? `<div class="msec"><div class="hd"><b>Spice level</b><small>Prints on the ticket</small></div>
             <div class="chips">${SPICE.map(([n, d]) => `<button type="button" class="chip ${m.spice === n ? 'on' : ''}" data-act="opt-spice" data-v="${n}">${n}<small>${d}</small></button>`).join('')}</div></div>` : ''}
-          ${i.addons.length ? `<div class="msec"><div class="hd"><b>Add-ons</b><small>Tap to toggle</small></div>
-            <div class="chips">${i.addons.map((a) => `<button type="button" class="chip ${m.addons.has(a.id) ? 'on' : ''}" data-act="opt-addon" data-id="${a.id}">${esc(a.name)}<small>+${money(a.price_cents)}</small></button>`).join('')}</div></div>` : ''}
+          ${i.addons.length ? `<div class="msec"><div class="hd"><b>Add-ons</b><small>Quantity per dish${m.qty > 1 ? ` · ×${m.qty} dishes` : ''}</small></div>
+            <div class="aq-list">${i.addons.map((a) => { const n = m.addons.get(a.id) || 0; const max = a.max_qty || 5;
+              return `<div class="aq ${n ? 'on' : ''}">
+                <button type="button" class="aq-name" data-act="opt-addon" data-id="${a.id}"><b>${esc(a.name)}</b><small>${money(a.price_cents)}${a.unit ? ' per ' + esc(a.unit) : ''}</small></button>
+                <div class="stepper sm"><button type="button" data-act="opt-aq" data-id="${a.id}" data-d="-1" ${n ? '' : 'disabled'} aria-label="Less ${esc(a.name)}">−</button><span>${n}</span><button type="button" data-act="opt-aq" data-id="${a.id}" data-d="1" ${n >= max ? 'disabled' : ''} aria-label="More ${esc(a.name)}">+</button></div>
+                <span class="aq-tot">${n ? '+' + money(n * a.price_cents) : ''}</span></div>`; }).join('')}</div></div>` : ''}
           <div class="msec"><div class="hd"><b>Course</b><small>Mains and desserts can be held until fired</small></div>
             <div class="chips">${COURSES.map((c) => `<button type="button" class="chip ${m.course === c ? 'on' : ''}" data-act="opt-course" data-v="${c}">${COURSE_LABEL[c]}${c === m.defCourse ? '<small>Default</small>' : ''}</button>`).join('')}</div></div>
           <div class="msec"><div class="hd"><b>Kitchen ticket</b><small>${m.item.no_kot ? 'This dish is ready-made by default' : 'Untick if it is already cooked'}</small></div>
@@ -1502,7 +1517,7 @@
     const q = eq(i);
     return r(`${q} x ${esc(i.name)}`, money(q * i.unit_price_cents))
       + (i.spice ? `<div class="mod">&nbsp;&nbsp;&nbsp;&nbsp;Spice: ${esc(i.spice)}</div>` : '')
-      + (i.addons || []).map((a) => r(`&nbsp;&nbsp;&nbsp;&nbsp;+ ${esc(a.name)}${q > 1 ? ` x${q}` : ''}`, money(q * a.price_cents))).join('');
+      + (i.addons || []).map((a) => r(`&nbsp;&nbsp;&nbsp;&nbsp;+ ${esc(addonLabel(a, q * aq(a)))}`, money(q * aq(a) * a.price_cents))).join('');
   };
 
   // Header for browser-printed bills (and the preview in Settings)
@@ -1669,18 +1684,23 @@
     options: (d) => {
       const cat = S.menu.categories.find((c) => c.items.some((i) => String(i.id) === d.id));
       const item = cat.items.find((i) => String(i.id) === d.id);
-      S.modal = { kind: 'options', item, catName: cat.name, defCourse: cat.default_course, course: cat.default_course, spice: 'Standard', addons: new Set(), note: '', qty: 1, sendKot: !item.no_kot };
+      S.modal = { kind: 'options', item, catName: cat.name, defCourse: cat.default_course, course: cat.default_course, spice: 'Standard', addons: new Map(), note: '', qty: 1, sendKot: !item.no_kot };
       renderModal();
     },
     'opt-spice': (d) => { S.modal.spice = d.v; keepNote(); renderModal(); },
-    'opt-addon': (d) => { const id = +d.id; S.modal.addons.has(id) ? S.modal.addons.delete(id) : S.modal.addons.add(id); keepNote(); renderModal(); },
+    'opt-addon': (d) => { const id = +d.id; S.modal.addons.has(id) ? S.modal.addons.delete(id) : S.modal.addons.set(id, 1); keepNote(); renderModal(); },
+    'opt-aq': (d) => {
+      const id = +d.id; const a = S.modal.item.addons.find((x) => x.id === id);
+      const n = Math.min(a?.max_qty || 5, Math.max(0, (S.modal.addons.get(id) || 0) + +d.d));
+      n ? S.modal.addons.set(id, n) : S.modal.addons.delete(id); keepNote(); renderModal();
+    },
     'opt-course': (d) => { S.modal.course = d.v; keepNote(); renderModal(); },
     'opt-kot': (d) => { S.modal.sendKot = d.v === '1'; keepNote(); renderModal(); },
     'opt-qty': (d) => { S.modal.qty = Math.max(1, S.modal.qty + +d.d); keepNote(); renderModal(); },
     'opt-add': async () => {
       keepNote();
       const m = S.modal;
-      S.order = await api(`/orders/${S.order.id}/items`, { body: { menu_item_id: m.item.id, qty: m.qty, spice: m.spice, addon_ids: [...m.addons], course: m.course, note: m.note.trim(), no_kot: !m.sendKot } });
+      S.order = await api(`/orders/${S.order.id}/items`, { body: { menu_item_id: m.item.id, qty: m.qty, spice: m.spice, addons: [...m.addons].map(([id, qty]) => ({ id, qty })), course: m.course, note: m.note.trim(), no_kot: !m.sendKot } });
       S.modal = null; render();
     },
     qty: async (d) => { S.order = await api('/items/' + d.id, { method: 'PATCH', body: { qty: +d.q } }); render(); },
