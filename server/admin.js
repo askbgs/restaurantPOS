@@ -24,7 +24,7 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
 
   // Every successful admin change is written to the audit log (PINs and photo bytes are never logged).
   const NOUN = { categories: 'category', items: 'dish', areas: 'area', tables: 'table', stations: 'station', staff: 'staff member',
-    settings: 'settings', 'sample-menu': 'sample menu', printing: 'printing' };
+    settings: 'settings', 'sample-menu': 'sample menu', printing: 'printing', integrations: 'n8n integration' };
   r.use((req, res, next) => {
     if (req.method === 'GET') return next();
     const parts = req.path.split('/').filter(Boolean); // captured before sub-routers rewrite the path
@@ -45,13 +45,17 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
           : sub === 'jobs' ? `Print job #${parts[2]} retried`
           : parts[3] === 'test' ? `Test print sent to printer #${parts[2]}`
           : `Printer ${label || '#' + (parts[2] || '')} ${verb}`;
+      } else if (parts[0] === 'integrations') {
+        summary = parts[1] === 'test' ? 'n8n test event sent' : parts[1] === 'resend-last-shift' ? 'Last Z-report re-sent to n8n'
+          : parts[1] === 'events' || parts[1] === 'retry-all' ? 'n8n events retried'
+          : `n8n integration settings changed${b.new_secret ? ' (new signing secret)' : ''}`;
       } else if (parts[1] && parts[2] === 'image') summary = `Photo ${req.method === 'DELETE' ? 'removed from' : 'uploaded for'} dish #${parts[1]}`;
       else {
         const what = NOUN[parts[0]] || parts[0] || 'record';
         summary = `${what[0].toUpperCase()}${what.slice(1)} ${label || (parts[1] ? '#' + parts[1] : '')} ${verb}`.replace(/\s+/g, ' ');
       }
       if (parts[0] === 'staff' && b.pin) summary += ' (PIN changed)';
-      const details = Object.fromEntries(Object.entries(b).filter(([k]) => !/pin|token|image|raster/i.test(k)).slice(0, 20));
+      const details = Object.fromEntries(Object.entries(b).filter(([k]) => !/pin|token|image|raster|secret/i.test(k)).slice(0, 20));
       audit(pool, { action: `admin.${parts[0] || 'change'}`, staffId: req.user.id, summary, details }).catch(() => {});
     });
     next();

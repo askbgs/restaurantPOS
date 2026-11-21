@@ -522,7 +522,7 @@
   }
 
   // ---------- admin ----------
-  const ADMIN_SECTIONS = [['items', 'Menu items'], ['categories', 'Categories'], ['floor', 'Floor & tables'], ['stations', 'Stations'], ['staff', 'Staff'], ['printers', 'Printers'], ['audit', 'Audit log'], ['settings', 'Settings']];
+  const ADMIN_SECTIONS = [['items', 'Menu items'], ['categories', 'Categories'], ['floor', 'Floor & tables'], ['stations', 'Stations'], ['staff', 'Staff'], ['printers', 'Printers'], ['integrations', 'Integrations'], ['audit', 'Audit log'], ['settings', 'Settings']];
   const ADMIN_PATH = { item: 'items', category: 'categories', area: 'areas', table: 'tables', station: 'stations', staff: 'staff' };
   const ADMIN_NOUN = { item: 'dish', category: 'category', area: 'area', table: 'table', station: 'station', staff: 'staff member' };
   const isManager = () => S.user?.role === 'Manager';
@@ -679,6 +679,7 @@
     }
     if (A.section === 'printers') return printersList();
     if (A.section === 'audit') return auditList();
+    if (A.section === 'integrations') return integrationsList();
     if (A.section === 'settings') {
       const st = D.settings;
       const p = (f) => +(f * 100).toFixed(3);
@@ -749,6 +750,18 @@
     return `<h3 style="margin:0 0 6px">Shop server &amp; cloud sync</h3><div class="sync-box">${body}</div>`;
   }
 
+  function integFormBody() {
+    const f = $('#integ-form'); const fd = new FormData(f);
+    return { url: fd.get('url'), email: fd.get('email'), variance_limit: fd.get('variance_limit'), events: fd.getAll('events') };
+  }
+  // The log refreshes itself while the Integrations page is open
+  async function integRefreshSoon() { await loadIntegrations(); render(); setTimeout(() => integTick(), 1500); }
+  async function integTick() {
+    if (S.tab !== 'admin' || S.admin.section !== 'integrations' || S.modal || document.activeElement?.closest('#integ-form')) return;
+    try { await loadIntegrations(); const y = $('#admin-list')?.scrollTop; render(); const l = $('#admin-list'); if (l && y) l.scrollTop = y; } catch { /* ignore */ }
+  }
+  setInterval(integTick, 5000);
+
   function adminView() {
     if (!isManager()) return '<section class="start"><h1 class="title">Managers only</h1><div class="muted">Sign in with a Manager PIN to open Admin.</div></section>';
     if (!S.admin.data) return '<section class="hist"><div class="empty">Loading…</div></section>';
@@ -764,6 +777,12 @@
             2. Choose which printer gets bills and which station prints where.<br><br>
             3. Run the print bridge on any PC on the same network. It stays connected and prints jobs within a second.<br><br>
             If no printer is set, the app falls back to the browser print dialog.</div>`
+        : S.admin.section === 'integrations' ? `<div class="empty" style="padding:28px 20px">
+            <b>Setting up email reports</b><br><br>1. Click <b>Download n8n workflow</b> and import it in n8n (Workflows → Import from file).<br><br>
+            2. In n8n, add your SMTP or Gmail login to the <b>Send email</b> node, and paste the signing secret into <b>Check signature</b>.<br><br>
+            3. Activate the workflow, copy its <b>Production URL</b> and paste it here. Add the owner's email and save.<br><br>
+            4. Click <b>Send test event</b>. The owner should get a test email within a few seconds.<br><br>
+            From then on, closing a shift emails the Z-report automatically.</div>`
         : S.admin.section === 'settings'
         ? '<div class="empty" style="padding:28px 20px">Changes apply to every terminal straight away. Tax and service charge changes apply to open and new orders; paid orders keep their totals.</div>'
         : adminForm()}</aside>
@@ -1056,6 +1075,45 @@
 
   // ---------- admin: printers + audit ----------
   async function loadPrinting() { S.admin.printing = await api('/admin/printing'); }
+  async function loadIntegrations() { S.admin.integ = await api('/admin/integrations'); }
+  // n8n: where events go, which events, owner email, cash variance limit, signing secret and the delivery log.
+  function integrationsList() {
+    const I = S.admin.integ;
+    if (!I) return '<div class="empty">Loading…</div>';
+    const st = (e) => e.status === 'sent' ? '<span class="s paid">Sent</span>'
+      : e.status === 'failed' ? '<span class="s ready">Failed</span>' : `<span class="s kitchen">Waiting</span>`;
+    const when = (t) => t ? `${new Date(t).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} ${clock(t)}` : '—';
+    const label = { 'shift.closed': 'Z-report', 'cash.variance': 'Cash variance', test: 'Test' };
+    const health = !I.url ? 'Not set up'
+      : I.counts.failed ? `<b class="note-red">${I.counts.failed} failed. Check the log below.</b>`
+      : I.counts.pending ? `${I.counts.pending} waiting to send${I.log.find((e) => e.status === 'pending' && e.last_error) ? ' · <span class="note-red">n8n not answering</span>' : ''}`
+      : I.counts.last_sent ? `Connected · last sent ${ago(I.counts.last_sent)}` : 'Ready. Send a test event.';
+    return `<div class="page-head" style="border-bottom:0"><div><div class="eyebrow">Admin</div><h1 class="title">Integrations</h1>
+        <div class="muted">Send POS events to n8n. n8n emails the owner the Z-report when a shift closes, and an alert when the cash count is off.</div></div></div>
+      ${I.mode === 'mirror' ? '<div class="warn" style="margin:0 28px 18px"><span>This is the cloud copy. Set up n8n on the shop server: events are sent from there.</span></div>' : ''}
+      <form id="integ-form" class="settings-form" autocomplete="off">
+        <div class="sync-box"><div class="r"><span>Status</span><span>${health}</span></div></div>
+        ${field('n8n webhook URL', inp('url', I.url, 'type="url" placeholder="https://your-n8n.example.com/webhook/pos-events"'), 'Production URL of the Webhook node in the "Restaurant POS → email" workflow.')}
+        <div class="two">${field('Owner email', inp('email', I.email, 'placeholder="owner@example.com"'), 'Where n8n sends the reports. Several: separate with commas.')}
+          ${field(`Cash variance alert at (${esc(S.cfg.currency.trim())})`, inp('variance_limit', (I.variance_limit_cents / 100).toFixed(2), 'inputmode="decimal"'), 'Alert when counted cash is over or short by at least this much. 0 = any difference.')}</div>
+        <div class="field"><label>Events to send</label>
+          ${Object.entries(I.available).map(([k, v]) => `<label class="check"><input type="checkbox" name="events" value="${k}" ${I.events.includes(k) ? 'checked' : ''}> <b>${k}</b> <span class="muted">· ${esc(v)}</span></label>`).join('')}</div>
+        <div class="field"><label>Signing secret</label>
+          <div class="secret-row"><input readonly value="${esc(I.secret || 'Created when you save')}" id="integ-secret">
+            ${I.secret ? '<button type="button" class="btn" data-act="integ-copy">Copy</button><button type="button" class="btn" data-act="integ-new-secret">New secret</button>' : ''}</div>
+          <small>Paste this into the "Check signature" node in n8n. Every request is signed with it, so n8n ignores anything that isn't from this POS.</small></div>
+        <div class="integ-actions"><button type="submit" class="btn red">Save</button>
+          ${I.url ? '<button type="button" class="btn" data-act="integ-test">Send test event</button><button type="button" class="btn" data-act="integ-resend">Re-send last Z-report</button>' : ''}
+          <a class="btn" href="/n8n/restaurant-pos-email.json" download>Download n8n workflow</a></div>
+      </form>
+      <div class="page-head" style="border-bottom:0;padding-top:6px"><div><h3 style="margin:0">Delivery log</h3><div class="muted">Events wait here while the internet or n8n is down, and are sent in order when it's back.</div></div>
+        ${I.counts.failed || I.counts.pending ? '<button type="button" class="btn" data-act="integ-retry-all">Retry now</button>' : ''}</div>
+      <div class="htable-wrap"><table class="htable"><thead><tr><th>#</th><th>Event</th><th>Created</th><th>Status</th><th>Tries</th><th>Result</th><th></th></tr></thead><tbody>
+        ${I.log.map((e) => `<tr><td>${e.id}</td><td><b>${esc(label[e.event] || e.event)}</b><div class="muted" style="font-size:12px">${esc(e.event)}</div></td><td>${when(e.created_at)}</td><td>${st(e)}</td><td>${e.attempts}</td>
+          <td class="muted" style="max-width:260px;font-size:13px">${e.status === 'sent' ? `${when(e.sent_at)} · HTTP ${e.last_status}` : e.last_error ? esc(e.last_error) + (e.status === 'pending' ? `<br>Next try ${clock(e.next_try_at)}` : '') : 'Sending…'}</td>
+          <td>${e.status !== 'sent' ? `<button type="button" class="link-red" data-act="integ-retry" data-id="${e.id}">Retry</button>` : ''}</td></tr>`).join('')
+          || '<tr><td colspan="7" class="muted" style="padding:20px">No events yet.</td></tr>'}</tbody></table></div><div style="height:28px"></div>`;
+  }
   async function loadAudit() { S.admin.audit = (await api('/admin/audit?action=' + encodeURIComponent(S.admin.auditFilter || ''))).entries; }
   function printersList() {
     const P = S.admin.printing;
@@ -1783,7 +1841,18 @@
       resetImg(); S.admin.section = d.id; S.admin.sel = null;
       if (d.id === 'printers') await loadPrinting();
       if (d.id === 'audit') await loadAudit();
+      if (d.id === 'integrations') await loadIntegrations();
       render();
+    },
+    'integ-test': async () => { await api('/admin/integrations/test', { body: {} }); toast('Test event queued'); await integRefreshSoon(); },
+    'integ-resend': async () => { const r = await api('/admin/integrations/resend-last-shift', { body: {} }); toast(`Z-report for shift #${r.shift_id} queued`); await integRefreshSoon(); },
+    'integ-retry': async (d) => { await api(`/admin/integrations/events/${d.id}/retry`, { body: {} }); await integRefreshSoon(); },
+    'integ-retry-all': async () => { const r = await api('/admin/integrations/retry-all', { body: {} }); toast(`Retrying ${r.retried} event${r.retried === 1 ? '' : 's'}`); await integRefreshSoon(); },
+    'integ-copy': async () => { try { await navigator.clipboard.writeText(S.admin.integ.secret); toast('Secret copied'); } catch { $('#integ-secret').select(); toast('Press Ctrl+C to copy'); } },
+    'integ-new-secret': () => {
+      S.modal = { kind: 'confirm', title: 'Create a new signing secret?', text: 'n8n will reject events until you paste the new secret into its "Check signature" node.', yes: 'Create new secret',
+        run: async () => { const body = { ...integFormBody(), new_secret: true }; S.modal = null; renderModal(); await api('/admin/integrations', { method: 'PATCH', body }); await loadIntegrations(); toast('New secret created. Update it in n8n.'); render(); } };
+      renderModal();
     },
     'admin-sel': (d) => { resetImg(); S.admin.sel = { kind: d.kind, id: +d.id }; render(); },
     'admin-img-remove': () => {
@@ -2042,6 +2111,10 @@
       const f = Object.fromEntries(new FormData(e.target).entries());
       S.rep.from = f.from; S.rep.to = f.to;
       run(async () => { await loadReport(); render(); })();
+    }
+    if (e.target.id === 'integ-form') {
+      e.preventDefault();
+      run(async () => { await api('/admin/integrations', { method: 'PATCH', body: integFormBody() }); await loadIntegrations(); toast('Integration saved'); render(); })();
     }
     if (e.target.id === 'settings-form') {
       e.preventDefault();

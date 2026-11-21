@@ -104,6 +104,28 @@ If no printer is configured, the browser print dialog is used as before.
 
 To start the bridge automatically when Windows starts, put the command in a `.bat` file in the Startup folder, or use `pm2` / NSSM.
 
+## Email reports with n8n (Admin → Integrations)
+
+When a shift closes, the POS sends the Z-report to an n8n workflow, and n8n emails it to the owner. If the counted cash is over or short by more than a limit you set, a separate **Cash variance** alert email goes out too.
+
+**Setup (about 10 minutes):**
+1. Admin → Integrations → **Download n8n workflow**. In n8n: Workflows → **Import from file**.
+2. In the **Send email** node, add an SMTP credential and set the From address.
+   - Gmail: host `smtp.gmail.com`, port `465`, SSL on, user = your Gmail address, password = a Google **app password** (not your normal password).
+3. Copy the **signing secret** from Admin → Integrations into the **Check signature** node (the *Secret* field).
+4. Activate (publish) the workflow. Copy the **Production URL** of the *POS webhook* node into Admin → Integrations, add the owner's email (several are allowed, separated by commas), and save.
+5. Click **Send test event**. A test email arrives within a few seconds. **Re-send last Z-report** lets you check the report email.
+
+**How it works:**
+- **Events:** `shift.closed`, with the full Z-report, and `cash.variance`, with expected, counted and difference. You can switch each on or off.
+- **Offline-safe:** events are saved in the `n8n_events` table in the same transaction as the shift close. If the internet or n8n is down, they wait and retry (20 s, 40 s … up to every 30 min, for about 10 hours). They are always delivered in order. The delivery log in Admin shows each event and its result, and has a **Retry** button.
+- **Signed requests:** every request carries `X-POS-Timestamp` and `X-POS-Signature: sha256=HMAC(secret, "<timestamp>.<body>")`. The workflow rejects bad signatures and anything older than 10 minutes with a 401.
+- **Retries on failure:** if the email can't be sent (SMTP down), n8n returns an error and the POS retries, so no report is lost.
+- **Where events are sent from:** on a shop server + cloud setup, the **shop server** sends the events. The n8n settings and secret stay on the shop server and are not copied to the cloud.
+- **Adding events later:** new events (stock low, voids, e-bills) are new event types on the same webhook. The workflow already answers 200 to events it doesn't email, so the POS doesn't retry them.
+
+The email layout lives in the workflow's **Check & build email** Code node (the same code is in `n8n/build-email.js`). Edit it there to change the wording or add sections.
+
 ## Works without internet: shop server + cloud copy
 
 Run the POS on a PC in the restaurant (`POS_MODE=local`). Ordering, kitchen tickets, printing and
@@ -163,6 +185,8 @@ server/admin.js    manager-only admin API + audit log
 server/printing.js print queue, receipt layouts, bridge API
 server/reports.js  sales + food-cost reports
 server/sync.js     offline-first sync: change queue, upload worker, cloud copy ingest
+server/integrations.js  n8n events: outbox, signed webhook delivery, Admin → Integrations API
+n8n/build-email.js the email builder used in the n8n workflow (public/n8n/*.json is the importable workflow)
 server/inventory.js  ingredients, recipes, stock ledger, suppliers, purchases
 server/inventory-sample.js  sample ingredients and recipes
 bridge/print-bridge.js  runs on a shop PC, sends ESC/POS to printers

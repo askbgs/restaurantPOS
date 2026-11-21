@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { pool, tx, migrate, hashPin, checkPin, startListener, notify, listeners } = require('./db');
 const adminRouter = require('./admin');
 const createPrinting = require('./printing');
+const createIntegrations = require('./integrations');
 const reportsRouter = require('./reports');
 const createInventory = require('./inventory');
 
@@ -161,6 +162,7 @@ async function openShift(c) {
 }
 
 const printing = createPrinting({ pool, tx, listeners, CONFIG, wrap, HttpError });
+const integrations = createIntegrations({ pool, tx, wrap, HttpError, CONFIG, MODE, shiftSummary: (c, id) => shiftSummary(c, id) });
 const inventory = createInventory({ pool, tx, wrap, HttpError, audit, notify });
 app.use('/bridge', printing.bridge);
 const sync = require('./sync')({ pool, tx, wrap, HttpError, notify, MODE, CLOUD_URL, SYNC_TOKEN });
@@ -233,6 +235,7 @@ app.get('/api/me', (req, res) => res.json(req.user));
 app.get('/api/sync/status', wrap(async (req, res) => res.json(await sync.status())));
 app.use('/api/admin', adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError, CONFIG, ENV_CONFIG, loadSettings, audit }));
 app.use('/api/admin/printing', printing.admin);
+app.use('/api/admin/integrations', integrations.admin);
 app.use('/api/reports', reportsRouter({ pool, wrap, HttpError, CONFIG }));
 app.use('/api/inventory', inventory.router);
 app.post('/api/logout', wrap(async (req, res) => {
@@ -809,9 +812,11 @@ app.post('/api/shift/close', wrap(async (req, res) => {
     const after = await shiftSummary(c, sh.id);
     const pid = await printing.printerFor(c, 'bill');
     const job = await printing.enqueue(c, pid, 'zreport', `Z report · shift #${sh.id}`, printing.zReportDoc(after));
+    await integrations.shiftClosed(c, after); // n8n: shift.closed (+ cash.variance when over the limit)
     return { id: sh.id, printed: !!job };
   });
   notify('shift');
+  integrations.kick(); // send the Z-report to n8n now that it's committed
   res.json({ ...(await shiftSummary(pool, id)), printed_to_printer: printed });
 }));
 
@@ -870,6 +875,7 @@ const PORT = process.env.PORT || 3000;
   await startListener();
   sync.start();
   if (PRINT_DIRECT) printing.startDirect();
+  integrations.start();
   console.log(`Mode: ${MODE}${MODE === 'local' ? ` · cloud copy: ${CLOUD_URL || 'not set'} · printing: ${PRINT_DIRECT ? 'direct' : 'via bridge'}` : ''}`);
   app.listen(PORT, () => console.log(`POS listening on :${PORT}`));
 })().catch((e) => { console.error(e); process.exit(1); });

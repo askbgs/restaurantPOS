@@ -621,3 +621,11 @@ svg.bars { width: 100%; height: 180px; display: block; overflow: visible; }
 .stepper.sm button { width: 36px; height: 36px; font-size: 18px; }
 .stepper.sm span { min-width: 26px; font-size: 16px; }
 .stepper button:disabled { color: #c4c2be; cursor: default; }
+
+/* integrations */
+.check { display: flex; align-items: baseline; gap: 8px; padding: 6px 0; font-size: 14.5px; cursor: pointer; }
+.check input { width: 18px; height: 18px; accent-color: var(--ink); transform: translateY(3px); }
+.secret-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; }
+.secret-row input { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; padding: 9px 10px; border: 2px solid #c9c7c3; background: var(--panel); min-width: 0; }
+.integ-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 22px; }
+.integ-actions .btn { text-decoration: none; }

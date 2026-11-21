@@ -350,3 +350,18 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS change_cents INT;
 -- v11: add-on quantities — each add-on has a unit (portion, piece…) and a max per dish
 ALTER TABLE item_addons ADD COLUMN IF NOT EXISTS unit TEXT;
 ALTER TABLE item_addons ADD COLUMN IF NOT EXISTS max_qty INT NOT NULL DEFAULT 5;
+
+-- v12: outgoing integration events (n8n). Kept on the shop server, never synced to the cloud copy.
+CREATE TABLE IF NOT EXISTS n8n_events (
+  id           BIGSERIAL PRIMARY KEY,
+  event        TEXT NOT NULL,
+  payload      JSONB NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'pending',   -- pending | sent | failed
+  attempts     INT NOT NULL DEFAULT 0,
+  next_try_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_status  INT,
+  last_error   TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  sent_at      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS n8n_events_due ON n8n_events (next_try_at) WHERE status = 'pending';

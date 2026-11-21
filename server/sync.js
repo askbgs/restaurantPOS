@@ -18,7 +18,8 @@ const TABLES = [
   ['settings', ['key']], ['app_images', ['key']],
 ];
 const PK = Object.fromEntries(TABLES);
-const LOCAL_ONLY_SETTINGS = new Set(['bridge_token', 'bridge_seen']);
+// Shop-only settings never go to the cloud copy: the print bridge token and the n8n integration (its signing secret).
+const LOCAL_ONLY_SETTINGS = { has: (k) => /^(bridge|n8n)_/.test(k) };
 const BATCH_BYTES = 3 * 1024 * 1024;
 
 const SYNC_SQL = `
@@ -37,7 +38,7 @@ CREATE OR REPLACE FUNCTION sync_capture() RETURNS trigger AS $$
 DECLARE r jsonb; p jsonb := '{}'::jsonb; k text;
 BEGIN
   IF TG_OP = 'DELETE' THEN r := to_jsonb(OLD); ELSE r := to_jsonb(NEW); END IF;
-  IF TG_TABLE_NAME = 'settings' AND r->>'key' LIKE 'bridge\_%' THEN RETURN NULL; END IF; -- shop-only values
+  IF TG_TABLE_NAME = 'settings' AND (r->>'key' LIKE 'bridge\_%' OR r->>'key' LIKE 'n8n\_%') THEN RETURN NULL; END IF; -- shop-only values
   FOREACH k IN ARRAY TG_ARGV LOOP p := p || jsonb_build_object(k, r -> k); END LOOP;
   INSERT INTO sync_outbox(tbl, op, pk) VALUES (TG_TABLE_NAME, left(TG_OP, 1), p);
   RETURN NULL;
