@@ -18,6 +18,30 @@
   --dining: #d9d8d5;
   --font: 'Archivo', 'Helvetica Neue', Arial, sans-serif;
 }
+
+/* ---------- scrollbars (theme) ----------
+   Thin, square, ink-on-paper like the rest of the UI; red on hover/drag. */
+/* Firefox only: Chrome/Edge/Safari ignore the ::-webkit styles below if these standard properties are set */
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: #a9a7a3 transparent; }
+  *:hover { scrollbar-color: var(--ink) transparent; }
+  .cmd code { scrollbar-color: #6b6a67 transparent; }
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #a9a7a3; border: 3px solid transparent; background-clip: padding-box; border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:active { background: var(--red); background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+/* panels with a visible gutter get a hairline track, like the table rules */
+.scroll::-webkit-scrollbar-track, .kcol-b::-webkit-scrollbar-track, .ticket-lines::-webkit-scrollbar-track,
+.modal-body::-webkit-scrollbar-track, .moves::-webkit-scrollbar-track { background: linear-gradient(to right, transparent 4px, var(--soft) 4px, var(--soft) 5px, transparent 5px); }
+/* dark surfaces: light thumb */
+.cmd code::-webkit-scrollbar-thumb { background: #6b6a67; background-clip: padding-box; }
+/* the top tab strip scrolls sideways without a visible bar */
+.tabs::-webkit-scrollbar, .stabs::-webkit-scrollbar { display: none; }
+.stabs { scrollbar-width: none; }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: var(--font); -webkit-font-smoothing: antialiased; }
 button { font: inherit; color: inherit; cursor: pointer; background: none; border: 0; padding: 0; }
