@@ -13,7 +13,7 @@
     shift: null, shifts: [], shiftSel: null, shiftDetail: null,
     rep: { preset: 'today', from: '', to: '', data: null },
     inv: { section: 'stock', data: null, recipes: null, purchases: null, reorder: null, sel: null, filter: 'all', rfilter: 'all', q: '', moves: null, supDetail: null, purDetail: null },
-    payMethod: 'card', payCard: { brand: '', last4: '', auth: '' }, modal: null, live: false,
+    payMethod: 'card', payCard: { brand: '', last4: '', auth: '' }, cashIn: '', modal: null, live: false,
   };
   const COURSES = ['drink', 'starter', 'main', 'dessert'];
   const COURSE_LABEL = { drink: 'Drink', starter: 'Starter', main: 'Main', dessert: 'Dessert' };
@@ -445,8 +445,8 @@
                   <div><label>Approval code <small class="muted">(optional)</small></label><input id="card-auth" maxlength="12" autocomplete="off" placeholder="From the slip" value="${esc(S.payCard.auth)}"></div></div>
                 <small class="muted" style="display:block;margin-top:6px">Only the card type and last 4 digits are saved. Never type the full card number.</small></div>` : ''}
               ${S.payMethod === 'cash' ? `<label style="display:block;margin-top:14px;font-size:14px;font-weight:600">Cash received</label>
-                <input id="cash-in" inputmode="decimal" style="width:100%;margin-top:6px;padding:10px;border:2px solid #9a9a9a;font-size:18px" placeholder="0.00">
-                <div id="change" class="muted" style="margin-top:6px"></div>` : ''}
+                <input id="cash-in" class="cash-in ${cashState(o).short ? 'short' : ''}" inputmode="decimal" autocomplete="off" placeholder="0.00" value="${esc(S.cashIn)}">
+                <div id="change" class="cash-msg ${cashState(o).short ? 'short' : ''}">${cashState(o).msg}</div>` : ''}
             </div>
           </div>
           <div class="due">
@@ -458,6 +458,21 @@
           </div>
         </aside>
       </section>`;
+  }
+
+  // Cash tendered vs amount due. Cents, so Rs 1,350.00 typed as "1350" or "1,350.00" both work.
+  function parseCash(v) {
+    const t = String(v || '').replace(/[,\s]/g, '').replace(/^rs\.?/i, '');
+    if (!t) return null;
+    if (!/^\d+(\.\d{1,2})?$/.test(t)) return NaN;
+    return Math.round(parseFloat(t) * 100);
+  }
+  function cashState(o) {
+    const got = parseCash(S.cashIn);
+    if (got === null) return { got, short: false, msg: '' };
+    if (Number.isNaN(got)) return { got, short: true, msg: 'Enter an amount like 5000 or 5000.00' };
+    const ch = got - o.total_cents;
+    return ch >= 0 ? { got, short: false, msg: `Change: <b>${money(ch)}</b>` } : { got, short: true, msg: `Short by <b>${money(-ch)}</b> · must be at least ${money(o.total_cents)}` };
   }
 
   // ---------- history ----------
@@ -489,7 +504,7 @@
               <div class="muted">${d.type === 'dinein' ? `${d.guests} guests · ` : ''}Opened ${clock(d.opened_at)}${d.closed_at ? ` · Closed ${clock(d.closed_at)}` : ''}</div>
               ${d.customer_name || d.phone ? `<div style="margin-top:4px">${[d.customer_name, d.phone].filter(Boolean).map(esc).join(' · ')}</div>` : ''}
               ${d.status === 'open' ? `<button type="button" class="btn dark" style="margin-top:12px" data-act="open-order" data-id="${d.id}">Open order</button>` : ''}
-              ${d.status === 'paid' ? `<div style="margin-top:8px"><b>${money(d.total_cents)}</b> · ${esc((d.payment_method || '').toUpperCase())}${d.card_last4 ? ` · ${esc(d.card_brand || '')} •••• ${esc(d.card_last4)}${d.card_auth ? ` · auth ${esc(d.card_auth)}` : ''}` : ''}${d.refunded_cents ? ` · <span class="note-red">refunded ${money(d.refunded_cents)}</span>` : ''}</div>` : ''}
+              ${d.status === 'paid' ? `<div style="margin-top:8px"><b>${money(d.total_cents)}</b> · ${esc((d.payment_method || '').toUpperCase())}${d.card_last4 ? ` · ${esc(d.card_brand || '')} •••• ${esc(d.card_last4)}${d.card_auth ? ` · auth ${esc(d.card_auth)}` : ''}` : ''}${d.cash_received_cents != null ? ` · received ${money(d.cash_received_cents)}, change ${money(d.change_cents || 0)}` : ''}${d.refunded_cents ? ` · <span class="note-red">refunded ${money(d.refunded_cents)}</span>` : ''}</div>` : ''}
               <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
                 ${d.status === 'paid' && d.refunded_cents < d.total_cents ? `<button type="button" class="btn" data-act="refund" data-id="${d.id}">Refund</button>` : ''}
                 ${d.items.length ? `<button type="button" class="btn" data-act="reprint" data-id="${d.id}">Reprint ${d.status === 'paid' ? 'receipt' : 'bill'}</button>` : ''}</div></div>
@@ -1554,6 +1569,7 @@
       ${o.split_ways > 1 ? r(`Per person (${o.split_ways})`, money(Math.ceil(o.total_cents / o.split_ways))) : ''}
       ${o.status === 'paid' ? r('Paid by', esc((o.payment_method || '').toUpperCase())) : ''}
       ${o.status === 'paid' && o.payment_method === 'card' && o.card_last4 ? r('Card', `${esc(o.card_brand || '')} **** ${esc(o.card_last4)}`) + (o.card_auth ? r('Approval code', esc(o.card_auth)) : '') : ''}
+      ${o.status === 'paid' && o.payment_method === 'cash' && o.cash_received_cents != null ? r('Cash received', money(o.cash_received_cents)) + r('Change', money(o.change_cents || 0)) : ''}
       <hr>${S.cfg.billFooter ? `<div class="c">${esc(S.cfg.billFooter)}</div>` : ''}`;
     window.print();
   }
@@ -1586,7 +1602,7 @@
 
   // ---------- actions ----------
   async function openOrder(id, tab = 'order') {
-    if (S.order?.id !== +id) S.payCard = { brand: '', last4: '', auth: '' };
+    if (S.order?.id !== +id) { S.payCard = { brand: '', last4: '', auth: '' }; S.cashIn = ''; }
     await loadOrder(id);
     S.tab = tab; S.search = '';
     render();
@@ -1607,7 +1623,7 @@
   async function createOrder(body) {
     const o = await api('/orders', { body });
     S.order = o; S.tab = 'order'; S.search = ''; S.modal = null;
-    S.payMethod = 'card'; S.payCard = { brand: '', last4: '', auth: '' };
+    S.payMethod = 'card'; S.payCard = { brand: '', last4: '', auth: '' }; S.cashIn = '';
     await loadFloor();
     render();
   }
@@ -1722,12 +1738,21 @@
         if (!S.payCard.brand) { toast('Pick the card type (Visa, Mastercard…)', true); return; }
         if (!/^\d{4}$/.test(S.payCard.last4)) { toast('Enter the last 4 digits of the card', true); $('#card-last4')?.focus(); return; }
       }
+      let cash = {};
+      if (S.payMethod === 'cash') {
+        const st = cashState(o);
+        const err = st.got === null ? 'Enter the cash received' : Number.isNaN(st.got) ? 'Cash received is not a valid amount'
+          : st.short ? `Cash received is less than the total. Short by ${money(o.total_cents - st.got)}.` : '';
+        if (err) { toast(err, true); const f = $('#cash-in'); if (f) { f.classList.add('short'); f.focus(); f.select(); } return; }
+        cash = { cash_received_cents: st.got };
+      }
       const doIt = async () => {
-        const paid = await api(`/orders/${o.id}/pay`, { body: { payment_method: S.payMethod, ...card } });
-        toast(`Paid ${money(paid.total_cents)} · ${orderTitle(paid)}`);
+        const paid = await api(`/orders/${o.id}/pay`, { body: { payment_method: S.payMethod, ...card, ...cash } });
+        toast(`Paid ${money(paid.total_cents)} · ${orderTitle(paid)}${paid.change_cents ? ` · give change ${money(paid.change_cents)}` : ''}`);
+        S.cashIn = '';
         S.order = null; S.modal = null; S.tab = 'floor'; await loadFloor(); render();
       };
-      S.modal = { kind: 'confirm', title: `Charge ${money(o.total_cents)} by ${S.payMethod === 'card' ? `${S.payCard.brand} •••• ${S.payCard.last4}` : S.payMethod}?`,
+      S.modal = { kind: 'confirm', title: `Charge ${money(o.total_cents)} by ${S.payMethod === 'card' ? `${S.payCard.brand} •••• ${S.payCard.last4}` : S.payMethod}?${cash.cash_received_cents != null ? ` Received ${money(cash.cash_received_cents)}, change ${money(cash.cash_received_cents - o.total_cents)}.` : ''}`,
         text: pending ? `${pending} item${pending > 1 ? 's have' : ' has'} not been sent yet. ${pending > 1 ? 'They' : 'It'} will be sent to the kitchen now and included in this bill.` : `This closes ${orderTitle(o)}${o.type === 'dinein' ? ' and frees the table' : ''}.`,
         yes: 'Charge', run: doIt };
       renderModal();
@@ -2082,9 +2107,10 @@
       document.querySelectorAll('.cat').forEach((b) => b.classList.toggle('on', !S.search && +b.dataset.id === S.cat));
     }
     if (e.target.id === 'cash-in') {
-      const got = Math.round(parseFloat(e.target.value || '0') * 100);
-      const ch = got - S.order.total_cents;
-      $('#change').textContent = got ? (ch >= 0 ? `Change: ${money(ch)}` : `Short by ${money(-ch)}`) : '';
+      S.cashIn = e.target.value;
+      const st = cashState(S.order);
+      $('#change').innerHTML = st.msg;
+      $('#change').classList.toggle('short', st.short); e.target.classList.toggle('short', st.short);
     }
   });
   // chart hover tooltips

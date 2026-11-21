@@ -342,3 +342,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_deducted BOOLEAN NOT NULL DEFA
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS card_brand TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS card_last4 CHAR(4);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS card_auth TEXT;
+
+-- v10: cash payments record the cash handed over and the change given
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cash_received_cents INT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS change_cents INT;

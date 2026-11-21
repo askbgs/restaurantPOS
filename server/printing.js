@@ -123,6 +123,10 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
         d.push({ t: 'row', l: 'Card', r: `${o.card_brand || ''} **** ${o.card_last4}` });
         if (o.card_auth) d.push({ t: 'row', l: 'Approval code', r: o.card_auth });
       }
+      if (o.payment_method === 'cash' && o.cash_received_cents != null) {
+        d.push({ t: 'row', l: 'Cash received', r: money(o.cash_received_cents) });
+        d.push({ t: 'row', l: 'Change', r: money(o.change_cents || 0) });
+      }
     }
     for (const r of refunds) d.push({ t: 'row', l: `Refund (${r.method})`, r: '-' + money(r.amount_cents) });
     d.push({ t: 'hr' });

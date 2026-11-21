@@ -504,6 +504,7 @@ app.post('/api/kots/:id/reprint', wrap(async (req, res) => {
   res.json({ ok: true, job });
 }));
 
+const fmtMoney = (c) => CONFIG.currency + ((c || 0) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 app.post('/api/orders/:id/pay', wrap(async (req, res) => {
   const id = int(req.params.id);
   const method = req.body.payment_method;
@@ -519,6 +520,14 @@ app.post('/api/orders/:id/pay', wrap(async (req, res) => {
     if (auth && !/^[A-Z0-9]{2,12}$/.test(auth)) bad('Approval code should be 2–12 letters or numbers');
     card = { brand, last4, auth: auth || null };
   }
+  // Cash payments must cover the bill: cash received >= total (checked again below against the final total).
+  let cashGot = null;
+  if (method === 'cash') {
+    const v = req.body.cash_received_cents;
+    if (v === undefined || v === null || v === '') bad('Enter the cash received');
+    cashGot = Number(v);
+    if (!Number.isInteger(cashGot) || cashGot <= 0 || cashGot > 100000000) bad('Cash received is not a valid amount');
+  }
   let kitchenTouched = false;
   await tx(async (c) => {
     const { rows: [o] } = await c.query("SELECT * FROM orders WHERE id=$1 AND status='open' FOR UPDATE", [id]);
@@ -532,8 +541,12 @@ app.post('/api/orders/:id/pay', wrap(async (req, res) => {
     if (sent.length) kitchenTouched = true;
     const t = await saveTotals(c, id);
     if (t.total_cents <= 0) bad('Order total is zero');
-    await c.query(`UPDATE orders SET status='paid', payment_method=$2, closed_at=now(), shift_id=$3, card_brand=$4, card_last4=$5, card_auth=$6 WHERE id=$1`,
-      [id, method, shift.id, card.brand, card.last4, card.auth]);
+    if (cashGot !== null && cashGot < t.total_cents) {
+      bad(`Cash received (${fmtMoney(cashGot)}) is less than the total (${fmtMoney(t.total_cents)}). Short by ${fmtMoney(t.total_cents - cashGot)}.`);
+    }
+    await c.query(`UPDATE orders SET status='paid', payment_method=$2, closed_at=now(), shift_id=$3, card_brand=$4, card_last4=$5, card_auth=$6,
+                   cash_received_cents=$7, change_cents=$8 WHERE id=$1`,
+      [id, method, shift.id, card.brand, card.last4, card.auth, cashGot, cashGot === null ? null : cashGot - t.total_cents]);
     await inventory.deductForOrder(c, id, req.user.id); // recipe ingredients come out of stock
   });
   notify(kitchenTouched ? 'kitchen' : 'floor');
