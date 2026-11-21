@@ -47,11 +47,11 @@ async function tx(fn) {
   }
 }
 
-async function migrate() {
+async function migrate({ seed = true } = {}) {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   await pool.query(sql);
   const { rows } = await pool.query('SELECT count(*)::int AS n FROM staff');
-  if (rows[0].n === 0) {
+  if (rows[0].n === 0 && seed) {
     await require('./seed')(pool, hashPin);
     console.log('Seeded demo data (staff, floor, stations, menu).');
   }

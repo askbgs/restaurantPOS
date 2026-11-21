@@ -13,7 +13,7 @@
     shift: null, shifts: [], shiftSel: null, shiftDetail: null,
     rep: { preset: 'today', from: '', to: '', data: null },
     inv: { section: 'stock', data: null, recipes: null, purchases: null, reorder: null, sel: null, filter: 'all', rfilter: 'all', q: '', moves: null, supDetail: null, purDetail: null },
-    payMethod: 'card', modal: null, live: false,
+    payMethod: 'card', payCard: { brand: '', last4: '', auth: '' }, modal: null, live: false,
   };
   const COURSES = ['drink', 'starter', 'main', 'dessert'];
   const COURSE_LABEL = { drink: 'Drink', starter: 'Starter', main: 'Main', dessert: 'Dessert' };
@@ -33,6 +33,7 @@
   const mins = (d) => Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / 60000));
   const pct = (f) => `${+(f * 100).toFixed(3)}%`;
   const orderTitle = (o) => (o.type === 'dinein' ? `Table ${o.table_code}` : `${TYPE_LABEL[o.type]} #${o.order_no}`);
+  const CARD_BRANDS = ['Visa', 'Mastercard', 'Amex', 'UnionPay', 'JCB', 'Other'];
   const isPending = (i) => !i.kot_id && !i.served_direct;
   const lineTotal = (i) => (i.qty - (i.void_qty || 0)) * (i.unit_price_cents + i.addons_cents);
 
@@ -59,7 +60,27 @@
   const run = (fn) => (...a) => Promise.resolve(fn(...a)).catch((e) => { if (e.message !== 'Signed out') toast(e.message, true); });
 
   // ---------- data loading ----------
-  async function loadFloor() { [S.floor, S.shift] = await Promise.all([api('/floor'), api('/shift')]); }
+  async function loadFloor() {
+    [S.floor, S.shift] = await Promise.all([api('/floor'), api('/shift'), loadSync()]);
+  }
+  async function loadSync() { if (S.cfg?.mode && S.cfg.mode !== 'standalone') S.sync = await api('/sync/status').catch(() => S.sync); }
+  const ago = (t) => {
+    if (!t) return 'never';
+    const s0 = Math.max(0, Math.round((Date.now() - new Date(t)) / 1000));
+    return s0 < 60 ? 'just now' : s0 < 3600 ? `${Math.floor(s0 / 60)} min ago` : s0 < 86400 ? `${Math.floor(s0 / 3600)} h ago` : `${Math.floor(s0 / 86400)} days ago`;
+  };
+  // Shop server: is the cloud copy up to date? Cloud copy: when did the shop last send changes?
+  function syncPill() {
+    const y = S.sync; if (!y) return '';
+    if (y.mode === 'local') {
+      if (!y.configured) return '<span class="sync-pill" title="No cloud copy configured">Shop server</span>';
+      if (y.online === false) return `<span class="sync-pill off" title="No internet. The POS keeps working normally; ${y.pending} change(s) will upload to the cloud copy when the internet is back.">Offline${y.pending ? ` · ${y.pending} to sync` : ''}</span>`;
+      if (y.snapshot || !y.snapshot_done) return '<span class="sync-pill busy">Copying to cloud…</span>';
+      return `<span class="sync-pill ok" title="Cloud copy updated ${ago(y.last_ok_at)}">${y.pending ? `Syncing ${y.pending}…` : 'Cloud synced'}</span>`;
+    }
+    if (y.mode === 'mirror') return `<span class="sync-pill" title="Cloud copy. Changes from the shop arrive automatically.">Updated ${ago(y.last_ingest_at)}</span>`;
+    return '';
+  }
   async function loadOrder(id) { S.order = await api('/orders/' + (id || S.order.id)); if (S.order.payment_method) S.payMethod = S.order.payment_method; }
   async function loadKitchen() { S.kitchen = await api('/kitchen'); S.kitchen.fetchedAt = Date.now(); }
   async function loadHistory() {
@@ -148,9 +169,9 @@
           <div><b>${esc(S.cfg.restaurant)}</b><small>${esc(S.cfg.terminal)}</small></div></div>
         <nav class="tabs">
           ${tab('floor', 'Floor', `${f.seated ?? 0}/${f.tables ?? 0} tables`)}
-          ${tab('order', 'Order', o ? orderTitle(o) : 'New order')}
+          ${S.cfg.mode === 'mirror' ? '' : tab('order', 'Order', o ? orderTitle(o) : 'New order')}
           ${tab('kitchen', 'Kitchen', `${f.live_tickets ?? 0} live tickets`)}
-          ${tab('bill', 'Bill', o ? money(o.total_cents) : 'No order', !o)}
+          ${S.cfg.mode === 'mirror' ? '' : tab('bill', 'Bill', o ? money(o.total_cents) : 'No order', !o)}
           ${tab('history', 'History', `${f.closed_today ?? 0} closed`)}
           ${tab('shift', 'Shift', S.shift?.shift ? `#${S.shift.shift.id} open` : 'Not open')}
           ${isManager() ? tab('stock', 'Stock', f.stock_alerts ? `${f.stock_alerts} to reorder` : 'Ingredients') : ''}
@@ -158,6 +179,7 @@
           ${isManager() ? tab('admin', 'Admin', 'Menu & staff') : ''}
         </nav>
         <div class="top-right">
+          <span id="sync-pill">${syncPill()}</span>
           <span class="live-dot ${S.live ? '' : 'off'}" title="Live updates"></span>
           <span class="clock" id="clock">${clock(Date.now())}</span>
           <button type="button" class="avatar" data-act="logout" title="${esc(S.user.name)} · ${esc(S.user.role)}">${esc(S.user.initials)}</button>
@@ -399,6 +421,9 @@
         </div></div>
         <aside class="bill-right">
           <div class="bill-opts">
+            <div class="msec"><div class="hd"><b>Customer</b><small>Printed on the bill</small></div>
+              <div class="cust-row"><input id="cust-name" data-cust="customer_name" maxlength="80" placeholder="Customer name" value="${esc(o.customer_name || '')}">
+                <input id="cust-phone" data-cust="phone" maxlength="20" inputmode="tel" placeholder="Contact no. +94 7X XXX XXXX" value="${esc(o.phone || '')}"></div></div>
             <div class="msec"><div class="hd"><b>Discount</b>${o.discount_cents ? `<small>−${money(o.discount_cents)}</small>` : ''}</div>
               <div class="seg full">${segBtn('bill-set', 0, o.discount_pct, 'None', 'data-k="discount_pct"')}${segBtn('bill-set', 10, o.discount_pct, '10%', 'data-k="discount_pct"')}${segBtn('bill-set', 20, o.discount_pct, 'Staff 20%', 'data-k="discount_pct"')}</div></div>
             <div class="msec"><div class="hd"><b>Service charge</b><small>${money(o.service_cents)}</small></div>
@@ -409,6 +434,13 @@
               <div class="seg full">${[1, 2, 3, 4].map((t) => segBtn('bill-set', t, o.split_ways, t === 1 ? 'One bill' : `${t} ways`, 'data-k="split_ways"')).join('')}</div></div>
             <div class="msec" style="border-bottom:0"><div class="hd"><b>Payment method</b></div>
               <div class="seg full">${['card', 'cash', 'wallet'].map((m) => segBtn('pay-method', m, S.payMethod, m[0].toUpperCase() + m.slice(1))).join('')}</div>
+              ${S.payMethod === 'card' ? `<div class="card-box">
+                <label>Card type <small class="muted">as shown on the card or the terminal slip</small></label>
+                <div class="chips card-chips">${CARD_BRANDS.map((b) => `<button type="button" class="chip ${S.payCard.brand === b ? 'on' : ''}" data-act="card-brand" data-v="${b}">${b}</button>`).join('')}</div>
+                <div class="two" style="margin-top:10px"><div><label>Last 4 digits</label>
+                  <div class="last4"><span>••••</span><input id="card-last4" inputmode="numeric" maxlength="4" pattern="\\d{4}" placeholder="1234" autocomplete="off" value="${esc(S.payCard.last4)}"></div></div>
+                  <div><label>Approval code <small class="muted">(optional)</small></label><input id="card-auth" maxlength="12" autocomplete="off" placeholder="From the slip" value="${esc(S.payCard.auth)}"></div></div>
+                <small class="muted" style="display:block;margin-top:6px">Only the card type and last 4 digits are saved. Never type the full card number.</small></div>` : ''}
               ${S.payMethod === 'cash' ? `<label style="display:block;margin-top:14px;font-size:14px;font-weight:600">Cash received</label>
                 <input id="cash-in" inputmode="decimal" style="width:100%;margin-top:6px;padding:10px;border:2px solid #9a9a9a;font-size:18px" placeholder="0.00">
                 <div id="change" class="muted" style="margin-top:6px"></div>` : ''}
@@ -452,8 +484,9 @@
         <aside class="hdetail scroll">
           ${d ? `<div class="hd"><div class="eyebrow">${TYPE_LABEL[d.type]} · #${d.order_no}</div><h2>${esc(d.type === 'dinein' ? `Table ${d.table_code}` : d.customer_name || orderTitle(d))}</h2>
               <div class="muted">${d.type === 'dinein' ? `${d.guests} guests · ` : ''}Opened ${clock(d.opened_at)}${d.closed_at ? ` · Closed ${clock(d.closed_at)}` : ''}</div>
+              ${d.customer_name || d.phone ? `<div style="margin-top:4px">${[d.customer_name, d.phone].filter(Boolean).map(esc).join(' · ')}</div>` : ''}
               ${d.status === 'open' ? `<button type="button" class="btn dark" style="margin-top:12px" data-act="open-order" data-id="${d.id}">Open order</button>` : ''}
-              ${d.status === 'paid' ? `<div style="margin-top:8px"><b>${money(d.total_cents)}</b> · ${esc((d.payment_method || '').toUpperCase())}${d.refunded_cents ? ` · <span class="note-red">refunded ${money(d.refunded_cents)}</span>` : ''}</div>` : ''}
+              ${d.status === 'paid' ? `<div style="margin-top:8px"><b>${money(d.total_cents)}</b> · ${esc((d.payment_method || '').toUpperCase())}${d.card_last4 ? ` · ${esc(d.card_brand || '')} •••• ${esc(d.card_last4)}${d.card_auth ? ` · auth ${esc(d.card_auth)}` : ''}` : ''}${d.refunded_cents ? ` · <span class="note-red">refunded ${money(d.refunded_cents)}</span>` : ''}</div>` : ''}
               <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
                 ${d.status === 'paid' && d.refunded_cents < d.total_cents ? `<button type="button" class="btn" data-act="refund" data-id="${d.id}">Refund</button>` : ''}
                 ${d.items.length ? `<button type="button" class="btn" data-act="reprint" data-id="${d.id}">Reprint ${d.status === 'paid' ? 'receipt' : 'bill'}</button>` : ''}</div></div>
@@ -652,6 +685,7 @@
           <div class="bill-preview">${billHeaderHtml(st)}<div class="c muted" style="margin-top:6px">… bill items …</div>${st.billFooter ? `<div class="c" style="margin-top:6px">${esc(st.billFooter)}</div>` : ''}</div>
         </div>
         <div class="settings-form" style="margin-top:8px;border-top:1px solid var(--line);padding-top:22px">
+          ${syncPanel()}
           <h3 style="margin:0 0 6px">Login screen background</h3>
           <div class="muted" style="margin-bottom:12px">A photo of your restaurant behind the PIN pad. It's resized to 1920 px and faded slightly so the keypad stays easy to read.</div>
           <div class="img-edit" style="margin-bottom:26px"><div class="img-box bg-box"><img src="${esc(S.cfg.loginBg)}" alt=""></div>
@@ -667,6 +701,24 @@
         ${D.staff.map((s) => `<tr class="${selRow('staff', s.id)}" data-act="admin-sel" data-kind="staff" data-id="${s.id}">
           <td style="width:52px"><span class="avatar" style="display:inline-grid">${esc(s.initials)}</span></td><td class="name"><b>${esc(s.name)}</b>${s.id === S.user.id ? ' <span class="muted">(you)</span>' : ''}</td>
           <td>${esc(s.role)}</td><td><span class="s ${s.active ? 'paid' : 'void'}">${s.active ? 'Active' : 'Disabled'}</span></td></tr>`).join('')}</tbody></table></div>`;
+  }
+
+  function syncPanel() {
+    const y = S.sync; const mode = S.cfg.mode;
+    const row = (l, v) => `<div class="r"><span>${l}</span><span>${v}</span></div>`;
+    let body;
+    if (mode === 'local') {
+      body = !y?.configured ? '<p class="muted">This is the shop server, but no cloud copy is set. Add CLOUD_URL and SYNC_TOKEN to keep an off-site copy and remote reports.</p>'
+        : row('Cloud copy', esc(y.cloud)) + row('Internet', y.online === false ? '<b class="note-red">Not reachable. The POS keeps working.</b>' : y.online ? 'Connected' : 'Checking…')
+          + row('Waiting to sync', `${y.pending} change${y.pending === 1 ? '' : 's'}${y.oldest_pending ? ` (oldest ${ago(y.oldest_pending)})` : ''}`)
+          + row('Last successful sync', ago(y.last_ok_at)) + (y.snapshot ? row('Status', esc(y.snapshot)) : '')
+          + (y.last_error && y.online === false ? row('Last problem', `<span class="muted">${esc(y.last_error)}</span>`) : '');
+    } else if (mode === 'mirror') {
+      body = row('This server', 'Cloud copy (read-only)') + row('Last update from the shop', ago(y?.last_ingest_at));
+    } else {
+      body = `<p class="muted">Single server mode. To keep taking orders when the internet is down, run the POS on a PC in the shop and turn this server into a read-only cloud copy. See <b>SHOP-SERVER.md</b> in the project.</p>`;
+    }
+    return `<h3 style="margin:0 0 6px">Shop server &amp; cloud sync</h3><div class="sync-box">${body}</div>`;
   }
 
   function adminView() {
@@ -762,6 +814,8 @@
         ${drawerRow('Net sales', `<b>${money(sum.sales.gross_cents - sum.refunds.total_cents)}</b>`, 'tot')}</div>
       <div class="shift-box"><div class="lbl">PAYMENTS (after refunds)</div>
         ${['cash', 'card', 'wallet'].map((m) => drawerRow(m[0].toUpperCase() + m.slice(1), money(sum.payments[m] - sum.refunds[m]))).join('')}
+        ${(sum.card_brands || []).length ? `<div class="lbl" style="margin-top:12px">CARD BY TYPE <span class="muted">(match with the card machine)</span></div>
+          ${sum.card_brands.map((b) => drawerRow(`${esc(b.brand)} <span class="muted">× ${b.n}</span>`, money(b.v))).join('')}` : ''}
         <div class="lbl" style="margin-top:16px">VOIDS</div>
         ${drawerRow(`Items voided (${sum.voids.count})`, money(sum.voids.amount_cents))}${drawerRow('Orders voided', sum.voids.orders)}</div>
       <div class="shift-box drawer"><div class="lbl">CASH DRAWER</div>
@@ -818,7 +872,8 @@
       ${r('Orders paid', sum.sales.orders)}${r('Gross sales', money(sum.sales.gross_cents))}${r('Discounts', '-' + money(sum.sales.discount_cents))}
       ${r('Service', money(sum.sales.service_cents))}${r(esc(S.cfg.taxLabel), money(sum.sales.tax_cents))}${r('Tips', money(sum.sales.tip_cents))}
       ${r('Refunds', '-' + money(sum.refunds.total_cents))}<b>${r('Net sales', money(sum.sales.gross_cents - sum.refunds.total_cents))}</b><hr>
-      ${['cash', 'card', 'wallet'].map((m) => r(m, money(sum.payments[m] - sum.refunds[m]))).join('')}<hr>
+      ${['cash', 'card', 'wallet'].map((m) => r(m, money(sum.payments[m] - sum.refunds[m]))).join('')}
+      ${(sum.card_brands || []).map((b) => r(`&nbsp;&nbsp;${esc(b.brand)} (${b.n})`, money(b.v))).join('')}<hr>
       ${r('Float', money(sh.float_cents))}${r('Cash sales', money(sum.payments.cash))}${r('Cash refunds', '-' + money(sum.refunds.cash))}
       ${r('Cash in', money(sum.cash.in_cents))}${r('Cash out', '-' + money(sum.cash.out_cents))}<b>${r('Expected', money(sum.expected_cents))}</b>
       ${v != null ? r('Counted', money(sh.counted_cents)) + `<b>${r(v === 0 ? 'Balanced' : v > 0 ? 'Over' : 'Short', money(Math.abs(v)))}</b>` : ''}<hr>
@@ -916,7 +971,8 @@
           <div class="rep-card"><h3>Top 10 dishes</h3>${meterTable(d.top_items, [{ h: 'Dish', f: (r) => `${esc(r.name)}<div class="muted" style="font-size:12px">${esc(r.category)}</div>`, meter: true }, { h: 'Qty', f: (r) => r.qty, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }], 'qty')}</div>
           <div class="rep-card"><h3>Slowest dishes <small class="muted">on the menu</small></h3>${meterTable(d.slow_items, [{ h: 'Dish', f: (r) => `${esc(r.name)}<div class="muted" style="font-size:12px">${esc(r.category)}</div>` }, { h: 'Qty', f: (r) => r.qty, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }])}</div>
           <div class="rep-card"><h3>Order types</h3>${meterTable(d.by_type, [{ h: 'Type', f: (r) => TYPE(r.type), meter: true }, { h: 'Orders', f: (r) => r.orders, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }])}
-            <h3 style="margin-top:22px">Payments</h3>${meterTable(d.by_payment, [{ h: 'Method', f: (r) => (r.method || '').toUpperCase(), meter: true }, { h: 'Taken', f: (r) => money(r.cents), right: true }, { h: 'Refunded', f: (r) => (r.refund_cents ? '−' + money(r.refund_cents) : '—'), right: true }, { h: 'Net', f: (r) => money(r.cents - r.refund_cents), right: true }])}</div>
+            <h3 style="margin-top:22px">Payments</h3>${meterTable(d.by_payment, [{ h: 'Method', f: (r) => (r.method || '').toUpperCase(), meter: true }, { h: 'Taken', f: (r) => money(r.cents), right: true }, { h: 'Refunded', f: (r) => (r.refund_cents ? '−' + money(r.refund_cents) : '—'), right: true }, { h: 'Net', f: (r) => money(r.cents - r.refund_cents), right: true }])}
+            ${d.card_brands.length ? `<h3 style="margin-top:22px">Card payments by type</h3>${meterTable(d.card_brands, [{ h: 'Card', f: (r) => esc(r.brand), meter: true }, { h: 'Payments', f: (r) => r.orders, right: true }, { h: 'Amount', f: (r) => money(r.cents), right: true }])}` : ''}</div>
           <div class="rep-card"><h3>Staff</h3>${meterTable(d.staff, [{ h: 'Name', f: (r) => `${esc(r.name)}<div class="muted" style="font-size:12px">${esc(r.role)}</div>`, meter: true }, { h: 'Orders', f: (r) => r.orders, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }, { h: 'Avg bill', f: (r) => money(r.avg_cents), right: true }, { h: 'Voids', f: (r) => r.voids, right: true }])}</div>
           <div class="rep-card"><h3>Tables</h3>${meterTable(d.tables, [{ h: 'Table', f: (r) => `${esc(r.code)} <span class="muted">${esc(r.area)}</span>`, meter: true }, { h: 'Turns', f: (r) => r.orders, right: true }, { h: 'Covers', f: (r) => r.covers, right: true }, { h: 'Avg time', f: (r) => `${r.avg_minutes} min`, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }])}</div>
         </div>
@@ -950,6 +1006,7 @@
     sec('Dishes sold', ['Dish', 'Category', 'Qty', 'Sales'], d.all_items.map((x) => [x.name, x.category, x.qty, m(x.cents)]));
     sec('Order types', ['Type', 'Orders', 'Sales'], d.by_type.map((x) => [TYPE_LABEL[x.type] || x.type, x.orders, m(x.cents)]));
     sec('Payments', ['Method', 'Orders', 'Taken', 'Refunded', 'Net'], d.by_payment.map((x) => [x.method, x.orders, m(x.cents), m(x.refund_cents), m(x.cents - x.refund_cents)]));
+    sec('Card payments by type', ['Card', 'Payments', 'Amount'], d.card_brands.map((x) => [x.brand, x.orders, m(x.cents)]));
     sec('Staff', ['Name', 'Role', 'Orders', 'Sales', 'Avg bill', 'Tips', 'Voids'], d.staff.map((x) => [x.name, x.role, x.orders, m(x.cents), m(x.avg_cents), m(x.tip_cents), x.voids]));
     sec('Tables', ['Table', 'Area', 'Turns', 'Covers', 'Avg minutes', 'Sales'], d.tables.map((x) => [x.code, x.area, x.orders, x.covers, x.avg_minutes, m(x.cents)]));
     if (d.stock.has_recipes) {
@@ -982,10 +1039,13 @@
         <div class="muted">Kitchen tickets, void slips, bills and Z reports print automatically through the print bridge.</div></div>
         <button type="button" class="btn dark" data-act="admin-new" data-kind="printer">+ Add printer</button></div>
       <div style="padding:0 28px 28px">
+        ${S.cfg.printDirect ? `<div class="bridge on"><div><b>Printing directly from this shop server</b>
+          <div class="muted">No print bridge needed: the POS sends jobs straight to the network printers, with or without internet.${online ? '' : ' (Waiting for the print worker…)'}</div></div></div>` : `
         <div class="bridge ${online ? 'on' : ''}"><div><b>Print bridge: ${online ? 'online' : 'offline'}</b>
           <div class="muted">${seen === null ? 'Never connected yet.' : online ? 'Connected and waiting for jobs.' : `Last seen ${new Date(P.bridge_seen).toLocaleString('en-GB', { timeZone: S.cfg.timezone })}.`}</div></div>
-          <a class="btn" href="/bridge/print-bridge.js" download>Download print-bridge.js</a></div>
-        <div class="field" style="margin-top:14px"><label>Run this on the PC next to the printers (needs Node.js 18 or newer):</label>
+          <a class="btn" href="/bridge/print-bridge.js" download>Download print-bridge.js</a></div>`}
+        ${S.cfg.printDirect ? '<div class="muted" style="margin-top:10px">USB printers shared from a Windows PC still need the print bridge on that PC.</div>' : ''}
+        <div class="field ${S.cfg.printDirect ? 'hidden' : ''}" style="margin-top:14px"><label>Run this on the PC next to the printers (needs Node.js 18 or newer):</label>
           ${P.bridge_token ? `<div class="cmd"><code id="bridge-cmd">node print-bridge.js --server ${esc(origin)} --token ${esc(P.bridge_token)}</code><button type="button" class="btn" data-act="copy-cmd">Copy</button></div>` : '<div class="muted">Create a bridge token first.</div>'}
           <button type="button" class="link-red" style="margin-top:8px" data-act="bridge-token">${P.bridge_token ? 'Regenerate token (the old one stops working)' : 'Create bridge token'}</button></div>
         <h3 style="margin:22px 0 8px">Printers</h3>
@@ -1470,7 +1530,9 @@
     const r = (a, b) => `<div class="r"><span>${a}</span><span>${b}</span></div>`;
     P.innerHTML = `${billHeaderHtml()}<hr>
       <div>${esc(orderTitle(o))} · Order #${o.order_no}</div><div>${new Date().toLocaleString('en-GB', { timeZone: S.cfg.timezone })}</div>
-      <div>Server: ${esc(o.staff_name || '')}${o.type === 'dinein' ? ` · Guests: ${o.guests}` : ''}</div><hr>
+      <div>Server: ${esc(o.staff_name || '')}${o.type === 'dinein' ? ` · Guests: ${o.guests}` : ''}</div>
+      ${o.customer_name ? `<div>Customer: ${esc(o.customer_name)}</div>` : ''}${o.phone ? `<div>Contact: ${esc(o.phone)}</div>` : ''}
+      ${o.type === 'delivery' && o.address ? `<div>Deliver to: ${esc(o.address)}</div>` : ''}<hr>
       ${o.items.filter((i) => eq(i) > 0).map((i) => r(`${eq(i)} x ${esc(i.name)}`, money(lineTotal(i)))).join('')}<hr>
       ${r('Subtotal', money(o.subtotal_cents))}
       ${o.discount_cents ? r(`Discount ${o.discount_pct}%`, '-' + money(o.discount_cents)) : ''}
@@ -1479,6 +1541,8 @@
       ${o.tip_cents ? r(`Tip ${o.tip_pct}%`, money(o.tip_cents)) : ''}<hr>
       <b>${r('TOTAL', money(o.total_cents))}</b>
       ${o.split_ways > 1 ? r(`Per person (${o.split_ways})`, money(Math.ceil(o.total_cents / o.split_ways))) : ''}
+      ${o.status === 'paid' ? r('Paid by', esc((o.payment_method || '').toUpperCase())) : ''}
+      ${o.status === 'paid' && o.payment_method === 'card' && o.card_last4 ? r('Card', `${esc(o.card_brand || '')} **** ${esc(o.card_last4)}`) + (o.card_auth ? r('Approval code', esc(o.card_auth)) : '') : ''}
       <hr>${S.cfg.billFooter ? `<div class="c">${esc(S.cfg.billFooter)}</div>` : ''}`;
     window.print();
   }
@@ -1500,7 +1564,8 @@
     const active = document.activeElement?.id;
     const caret = active === 'search' ? document.activeElement.selectionStart : null;
     const scrolls = [...root.querySelectorAll('.scroll, .ticket-lines, .kcol-b')].map((e) => e.scrollTop);
-    root.innerHTML = `<div class="app">${header()}<main>${view}</main></div>`;
+    const mirrorBar = S.cfg.mode === 'mirror' ? `<div class="mirror-bar"><b>Cloud copy, read-only.</b> Orders, payments and changes are made on the POS in the shop and appear here automatically${S.sync?.last_ingest_at ? ` (last update ${ago(S.sync.last_ingest_at)})` : ''}.</div>` : '';
+    root.innerHTML = `<div class="app">${header()}${mirrorBar}<main>${view}</main></div>`;
     [...root.querySelectorAll('.scroll, .ticket-lines, .kcol-b')].forEach((e, i) => { if (scrolls[i]) e.scrollTop = scrolls[i]; });
     if (active === 'search') { const s = $('#search'); s.focus(); if (caret !== null) s.setSelectionRange(caret, caret); }
     if ($('#rec-total')) updateRecipeTotal();
@@ -1510,6 +1575,7 @@
 
   // ---------- actions ----------
   async function openOrder(id, tab = 'order') {
+    if (S.order?.id !== +id) S.payCard = { brand: '', last4: '', auth: '' };
     await loadOrder(id);
     S.tab = tab; S.search = '';
     render();
@@ -1530,7 +1596,7 @@
   async function createOrder(body) {
     const o = await api('/orders', { body });
     S.order = o; S.tab = 'order'; S.search = ''; S.modal = null;
-    S.payMethod = 'card';
+    S.payMethod = 'card'; S.payCard = { brand: '', last4: '', auth: '' };
     await loadFloor();
     render();
   }
@@ -1626,7 +1692,8 @@
       const v = d.k === 'service_on' ? d.v === 'true' : +d.v;
       S.order = await api('/orders/' + S.order.id, { method: 'PATCH', body: { [d.k]: v } }); render();
     },
-    'pay-method': (d) => { S.payMethod = d.v; render(); },
+    'pay-method': (d) => { S.payMethod = d.v; render(); if (d.v === 'card' && !S.payCard.brand) $('.card-chips .chip')?.focus(); },
+    'card-brand': (d) => { S.payCard.brand = d.v; render(); $('#card-last4')?.focus(); },
     'print-bill': async () => {
       S.order = await api(`/orders/${S.order.id}/print-bill`, { body: {} }); render();
       if (S.order.printed_to_printer) toast('Bill sent to the printer'); else printBill(S.order);
@@ -1639,12 +1706,17 @@
           run: async () => { S.modal = null; await setTab('shift'); } };
         return renderModal();
       }
+      const card = S.payMethod === 'card' ? { card_brand: S.payCard.brand, card_last4: S.payCard.last4, card_auth: S.payCard.auth } : {};
+      if (S.payMethod === 'card') {
+        if (!S.payCard.brand) { toast('Pick the card type (Visa, Mastercard…)', true); return; }
+        if (!/^\d{4}$/.test(S.payCard.last4)) { toast('Enter the last 4 digits of the card', true); $('#card-last4')?.focus(); return; }
+      }
       const doIt = async () => {
-        const paid = await api(`/orders/${o.id}/pay`, { body: { payment_method: S.payMethod } });
+        const paid = await api(`/orders/${o.id}/pay`, { body: { payment_method: S.payMethod, ...card } });
         toast(`Paid ${money(paid.total_cents)} · ${orderTitle(paid)}`);
         S.order = null; S.modal = null; S.tab = 'floor'; await loadFloor(); render();
       };
-      S.modal = { kind: 'confirm', title: `Charge ${money(o.total_cents)} by ${S.payMethod}?`,
+      S.modal = { kind: 'confirm', title: `Charge ${money(o.total_cents)} by ${S.payMethod === 'card' ? `${S.payCard.brand} •••• ${S.payCard.last4}` : S.payMethod}?`,
         text: pending ? `${pending} item${pending > 1 ? 's have' : ' has'} not been sent yet. ${pending > 1 ? 'They' : 'It'} will be sent to the kitchen now and included in this bill.` : `This closes ${orderTitle(o)}${o.type === 'dinein' ? ' and frees the table' : ''}.`,
         yes: 'Charge', run: doIt };
       renderModal();
@@ -1926,6 +1998,10 @@
     }
   });
   document.addEventListener('change', (e) => {
+    if (e.target.dataset.cust && S.order) {
+      const k = e.target.dataset.cust; const v = e.target.value.trim();
+      if ((S.order[k] || '') !== v) run(async () => { S.order = await api('/orders/' + S.order.id, { method: 'PATCH', body: { [k]: v } }); toast('Customer details saved'); render(); })();
+    }
     if (e.target.id === 'logo-file' && e.target.files[0]) {
       run(async () => {
         const out = await processLogo(e.target.files[0]);
@@ -1960,6 +2036,8 @@
     if (e.target.id === 'admin-cat') { S.admin.cat = e.target.value; $('#admin-list').innerHTML = adminList(); }
   });
   document.addEventListener('input', (e) => {
+    if (e.target.id === 'card-last4') { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4); S.payCard.last4 = e.target.value; }
+    if (e.target.id === 'card-auth') { S.payCard.auth = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); }
     if (e.target.id === 'inv-q') {
       S.inv.q = e.target.value; const pos = e.target.selectionStart;
       $('#inv-list').innerHTML = stockList(); const q = $('#inv-q'); q.focus(); q.setSelectionRange(pos, pos);
@@ -2023,6 +2101,7 @@
 
   // tick: clock every 15s, full re-render each minute for ages (skip while a modal or input is active)
   setInterval(() => { const c = $('#clock'); if (c && S.cfg) c.textContent = clock(Date.now()); }, 15000);
+  setInterval(() => { if (S.user && S.cfg?.mode !== 'standalone') loadSync().then(() => { const p = $('#sync-pill'); if (p) p.innerHTML = syncPill(); }); }, 10000);
   setInterval(() => { if (S.user && !S.modal && !['admin', 'reports', 'shift', 'stock'].includes(S.tab) && document.activeElement?.tagName !== 'INPUT') render(); }, 60000);
 
   // ---------- boot ----------
@@ -2032,6 +2111,7 @@
     try { S.user = await api('/me'); } catch { return renderLogin(); }
     [S.menu] = await Promise.all([api('/menu'), loadFloor()]);
     if (!S.es) { S.es = true; connectEvents(); }
+    if (S.cfg.mode === 'mirror' && S.tab === 'floor') { S.tab = isManager() ? 'reports' : 'history'; await setTab(S.tab); return; }
     render();
   }
   run(boot)();

@@ -96,7 +96,9 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
       { t: 'row', l: title(o), r: `#${o.order_no}`, bold: true },
       { t: 'text', s: when(o.closed_at || undefined) },
       { t: 'text', s: `Server: ${o.staff_name || ''}${o.type === 'dinein' ? ` · Guests: ${o.guests}` : ''}` });
-    if (o.customer_name && o.type !== 'dinein') d.push({ t: 'text', s: `Customer: ${o.customer_name}${o.phone ? ' · ' + o.phone : ''}` });
+    if (o.customer_name) d.push({ t: 'text', s: `Customer: ${o.customer_name}` });
+    if (o.phone) d.push({ t: 'text', s: `Contact: ${o.phone}` });
+    if (o.type === 'delivery' && o.address) d.push({ t: 'text', s: `Deliver to: ${o.address}` });
     d.push({ t: 'hr' });
     for (const i of o.items) {
       const q = i.qty - (i.void_qty || 0);
@@ -111,7 +113,13 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
     if (o.tip_cents) d.push({ t: 'row', l: `Tip ${o.tip_pct}%`, r: money(o.tip_cents) });
     d.push({ t: 'hr' }, { t: 'row', l: 'TOTAL', r: money(o.total_cents), bold: true, size: 2 });
     if (o.split_ways > 1) d.push({ t: 'row', l: `Per person (${o.split_ways})`, r: money(Math.ceil(o.total_cents / o.split_ways)) });
-    if (o.status === 'paid') d.push({ t: 'row', l: 'Paid by', r: (o.payment_method || '').toUpperCase() });
+    if (o.status === 'paid') {
+      d.push({ t: 'row', l: 'Paid by', r: (o.payment_method || '').toUpperCase() });
+      if (o.payment_method === 'card' && o.card_last4) {
+        d.push({ t: 'row', l: 'Card', r: `${o.card_brand || ''} **** ${o.card_last4}` });
+        if (o.card_auth) d.push({ t: 'row', l: 'Approval code', r: o.card_auth });
+      }
+    }
     for (const r of refunds) d.push({ t: 'row', l: `Refund (${r.method})`, r: '-' + money(r.amount_cents) });
     d.push({ t: 'hr' });
     if (CONFIG.billFooter) d.push({ t: 'text', s: CONFIG.billFooter, align: 'center' });
@@ -128,6 +136,7 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
       { t: 'text', s: when() },
       { t: 'row', l: 'Bill total', r: money(order.total_cents) },
       { t: 'row', l: `Refunded (${method})`, r: money(amount), bold: true, size: 2 },
+      ...(method === 'card' && order.card_last4 ? [{ t: 'row', l: 'To card', r: `${order.card_brand || ''} **** ${order.card_last4}` }] : []),
       { t: 'text', s: `Reason: ${reason}` },
       { t: 'text', s: `By: ${staffName}${approverName && approverName !== staffName ? ` · Approved: ${approverName}` : ''}` },
       { t: 'feed', n: 3 }, { t: 'text', s: 'Customer signature: ______________' },
@@ -156,6 +165,10 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
       { t: 'row', l: 'Net sales', r: money(s.sales.gross_cents - s.refunds.total_cents), bold: true },
       { t: 'hr' }, { t: 'text', s: 'PAYMENTS', bold: true });
     for (const m of ['cash', 'card', 'wallet']) d.push({ t: 'row', l: m[0].toUpperCase() + m.slice(1), r: money(s.payments[m] - s.refunds[m]) });
+    if (s.card_brands && s.card_brands.length) {
+      d.push({ t: 'text', s: 'Card payments by type:' });
+      for (const b of s.card_brands) d.push({ t: 'row', l: `  ${b.brand} (${b.n})`, r: money(b.v) });
+    }
     d.push({ t: 'hr' }, { t: 'text', s: 'CASH DRAWER', bold: true },
       { t: 'row', l: 'Opening float', r: money(s.shift.float_cents) },
       { t: 'row', l: 'Cash sales', r: money(s.payments.cash) },
@@ -329,5 +342,42 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
     res.json({ ok: true });
   }));
 
-  return { enqueue, printerFor, getSetting, kotDoc, voidDoc, billDoc, refundDoc, zReportDoc, bridge, admin };
+  // ---------- direct printing (shop server) ----------
+  // On the shop server the POS prints to the printers itself — no bridge PC needed, no internet needed.
+  let directOn = false;
+  function startDirect() {
+    if (directOn) return;
+    directOn = true;
+    const { render, sendNetwork, sendShare } = require('../bridge/print-bridge.js');
+    let wake = null;
+    listeners.add((kind) => { if (kind === 'print' && wake) wake(); });
+    (async function loop() {
+      for (;;) {
+        let jobs = []; let failed = false;
+        try {
+          jobs = await claimJobs();
+        } catch (e) { console.error('print queue', e.message); }
+        const byPrinter = new Map();
+        for (const j of jobs) { const k = `${j.conn}|${j.address}`; if (!byPrinter.has(k)) byPrinter.set(k, []); byPrinter.get(k).push(j); }
+        await Promise.all([...byPrinter.values()].map(async (list) => {
+          for (const j of list) {
+            try {
+              const data = render(j.doc, j.width_chars || 48);
+              if (j.conn === 'network') await sendNetwork(j.address, data); else await sendShare(j.address, data);
+              await pool.query("UPDATE print_jobs SET status='done', printed_at=now(), error=NULL WHERE id=$1", [j.id]);
+            } catch (e) {
+              failed = true;
+              await pool.query(`UPDATE print_jobs SET status = CASE WHEN attempts >= 3 THEN 'failed' ELSE 'pending' END, error=$2 WHERE id=$1`,
+                [j.id, String(e.message).slice(0, 300)]).catch(() => {});
+            }
+          }
+        }));
+        if (failed) await new Promise((r) => setTimeout(r, 4000)); // printer off or out of paper: don't hammer it
+        else if (!jobs.length) await new Promise((r) => { wake = r; setTimeout(r, 5000); });
+        wake = null;
+      }
+    })();
+  }
+
+  return { startDirect, enqueue, printerFor, getSetting, kotDoc, voidDoc, billDoc, refundDoc, zReportDoc, bridge, admin };
 };

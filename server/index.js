@@ -37,8 +37,24 @@ listeners.add((kind) => { if (kind === 'settings') loadSettings().catch((e) => c
 
 const app = express();
 app.set('trust proxy', 1);
+// ---------- deployment mode ----------
+//   standalone: one server, used directly (default)
+//   local:      the shop server — the master copy; works with no internet and syncs to the cloud when it can
+//   mirror:     the cloud copy on Railway — read-only, kept up to date by the shop server
+const MODE = ['local', 'mirror'].includes(process.env.POS_MODE) ? process.env.POS_MODE : 'standalone';
+const CLOUD_URL = String(process.env.CLOUD_URL || '').replace(/\/+$/, '');
+const SYNC_TOKEN = String(process.env.SYNC_TOKEN || '');
+const PRINT_DIRECT = process.env.PRINT_DIRECT ? process.env.PRINT_DIRECT === 'true' : MODE === 'local';
+
 const jsonBody = express.json({ limit: '200kb' });
-app.use((req, res, next) => (req.path === '/api/admin/logo' ? next() : jsonBody(req, res, next))); // the logo route parses its own larger body
+// the logo upload and the sync endpoint parse their own larger bodies
+app.use((req, res, next) => (req.path === '/api/admin/logo' || req.path === '/sync/ingest' ? next() : jsonBody(req, res, next)));
+
+// The cloud copy is read-only: changes are made on the shop server and synced up.
+app.use((req, res, next) => {
+  if (MODE !== 'mirror' || req.method === 'GET' || req.path.startsWith('/sync/') || ['/api/login', '/api/logout'].includes(req.path)) return next();
+  res.status(403).json({ error: 'This is the cloud copy (read-only). Make changes on the POS in the shop; they appear here automatically.' });
+});
 
 // ---------- helpers ----------
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -122,6 +138,7 @@ async function loadOrder(id, client = pool) {
 
 // ---------- audit log + manager approval ----------
 async function audit(c, { action, staffId = null, approvedBy = null, orderId = null, summary, details = {} }) {
+  if (MODE === 'mirror') return; // the cloud copy receives the shop's audit log instead
   await c.query('INSERT INTO audit_log(action, staff_id, approved_by, order_id, summary, details) VALUES ($1,$2,$3,$4,$5,$6)',
     [action, staffId, approvedBy && approvedBy !== staffId ? approvedBy : null, orderId, String(summary).slice(0, 300), JSON.stringify(details)]);
 }
@@ -135,6 +152,7 @@ async function approval(req, roles = ['Manager']) {
   if (!ok) throw new HttpError(403, 'Approval PIN not accepted');
   return ok.id;
 }
+const CARD_BRANDS = ['Visa', 'Mastercard', 'Amex', 'UnionPay', 'JCB', 'Other'];
 const reason = (v) => { const r = String(v || '').trim().slice(0, 200); if (r.length < 3) bad('Give a reason'); return r; };
 const otitle = (o) => (o.type === 'dinein' ? `Table ${o.table_code}` : `${({ takeaway: 'Takeaway', delivery: 'Delivery', counter: 'Counter' })[o.type]} #${o.order_no}`);
 async function openShift(c) {
@@ -145,13 +163,16 @@ async function openShift(c) {
 const printing = createPrinting({ pool, tx, listeners, CONFIG, wrap, HttpError });
 const inventory = createInventory({ pool, tx, wrap, HttpError, audit, notify });
 app.use('/bridge', printing.bridge);
+const sync = require('./sync')({ pool, tx, wrap, HttpError, notify, MODE, CLOUD_URL, SYNC_TOKEN });
+app.use('/sync', sync.ingest);
 
 // ---------- auth ----------
 app.get('/api/config', wrap(async (req, res) => {
   const { rows } = await pool.query("SELECT key, extract(epoch FROM updated_at)::bigint AS v FROM app_images WHERE key IN ('login_bg','logo')");
   const ver = Object.fromEntries(rows.map((r) => [r.key, r.v]));
   const { logoRaster, ...pub } = CONFIG;
-  res.json({ ...pub, loginBg: ver.login_bg ? `/login-bg?v=${ver.login_bg}` : '/img/login-bg.jpg', logo: ver.logo ? `/logo?v=${ver.logo}` : null });
+  res.json({ ...pub, mode: MODE, printDirect: PRINT_DIRECT,
+    loginBg: ver.login_bg ? `/login-bg?v=${ver.login_bg}` : '/img/login-bg.jpg', logo: ver.logo ? `/logo?v=${ver.logo}` : null });
 }));
 
 // Restaurant logo (public: shown on the login screen and printed bills)
@@ -209,6 +230,7 @@ async function auth(req, res, next) {
 app.use('/api', auth);
 
 app.get('/api/me', (req, res) => res.json(req.user));
+app.get('/api/sync/status', wrap(async (req, res) => res.json(await sync.status())));
 app.use('/api/admin', adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError, CONFIG, ENV_CONFIG, loadSettings, audit }));
 app.use('/api/admin/printing', printing.admin);
 app.use('/api/reports', reportsRouter({ pool, wrap, HttpError, CONFIG }));
@@ -304,7 +326,9 @@ app.patch('/api/orders/:id', wrap(async (req, res) => {
     tip_pct: (v) => { const n = int(v); if (n < 0 || n > 50) bad('Bad tip'); return n; },
     split_ways: (v) => { const n = int(v); if (n < 1 || n > 10) bad('Bad split'); return n; },
     payment_method: (v) => { if (!['card', 'cash', 'wallet'].includes(v)) bad('Bad payment method'); return v; },
-    customer_name: (v) => v || null, phone: (v) => v || null, address: (v) => v || null,
+    customer_name: (v) => String(v || '').trim().slice(0, 80) || null,
+    phone: (v) => { const p = String(v || '').trim().slice(0, 20); if (p && !/^[+\d][\d\s-]{5,19}$/.test(p)) bad('Phone number looks wrong'); return p || null; },
+    address: (v) => String(v || '').trim().slice(0, 300) || null,
   };
   const sets = []; const vals = [id];
   for (const [k, fn] of Object.entries(allowed)) {
@@ -484,6 +508,17 @@ app.post('/api/orders/:id/pay', wrap(async (req, res) => {
   const id = int(req.params.id);
   const method = req.body.payment_method;
   if (!['card', 'cash', 'wallet'].includes(method)) bad('Pick a payment method');
+  // Card payments record the card type and the last 4 digits (as on the terminal slip) — never the full number.
+  let card = { brand: null, last4: null, auth: null };
+  if (method === 'card') {
+    const brand = String(req.body.card_brand || '');
+    if (!CARD_BRANDS.includes(brand)) bad('Pick the card type (Visa, Mastercard…)');
+    const last4 = String(req.body.card_last4 || '').trim();
+    if (!/^\d{4}$/.test(last4)) bad('Enter the last 4 digits of the card');
+    const auth = String(req.body.card_auth || '').trim().toUpperCase();
+    if (auth && !/^[A-Z0-9]{2,12}$/.test(auth)) bad('Approval code should be 2–12 letters or numbers');
+    card = { brand, last4, auth: auth || null };
+  }
   let kitchenTouched = false;
   await tx(async (c) => {
     const { rows: [o] } = await c.query("SELECT * FROM orders WHERE id=$1 AND status='open' FOR UPDATE", [id]);
@@ -497,7 +532,8 @@ app.post('/api/orders/:id/pay', wrap(async (req, res) => {
     if (sent.length) kitchenTouched = true;
     const t = await saveTotals(c, id);
     if (t.total_cents <= 0) bad('Order total is zero');
-    await c.query("UPDATE orders SET status='paid', payment_method=$2, closed_at=now(), shift_id=$3 WHERE id=$1", [id, method, shift.id]);
+    await c.query(`UPDATE orders SET status='paid', payment_method=$2, closed_at=now(), shift_id=$3, card_brand=$4, card_last4=$5, card_auth=$6 WHERE id=$1`,
+      [id, method, shift.id, card.brand, card.last4, card.auth]);
     await inventory.deductForOrder(c, id, req.user.id); // recipe ingredients come out of stock
   });
   notify(kitchenTouched ? 'kitchen' : 'floor');
@@ -666,13 +702,15 @@ async function shiftSummary(c, shiftId) {
      LEFT JOIN staff a ON a.id=sh.opened_by LEFT JOIN staff b ON b.id=sh.closed_by WHERE sh.id=$1`, [shiftId]);
   if (!shift) throw new HttpError(404, 'Shift not found');
   const q = async (sql) => (await c.query(sql, [shiftId])).rows;
-  const [[sales], pays, refs, cash, [voids], [voidOrders], open, movements, refundList] = await Promise.all([
+  const [[sales], pays, refs, cardBrands, cash, [voids], [voidOrders], open, movements, refundList] = await Promise.all([
     q(`SELECT count(*)::int AS orders, coalesce(sum(total_cents),0)::int AS gross_cents, coalesce(sum(discount_cents),0)::int AS discount_cents,
               coalesce(sum(service_cents),0)::int AS service_cents, coalesce(sum(tax_cents),0)::int AS tax_cents, coalesce(sum(tip_cents),0)::int AS tip_cents,
               coalesce(sum(guests) FILTER (WHERE type='dinein'),0)::int AS covers
        FROM orders WHERE shift_id=$1 AND status='paid'`),
     q(`SELECT payment_method AS m, coalesce(sum(total_cents),0)::int AS v FROM orders WHERE shift_id=$1 AND status='paid' GROUP BY 1`),
     q(`SELECT method AS m, coalesce(sum(amount_cents),0)::int AS v FROM refunds WHERE shift_id=$1 GROUP BY 1`),
+    q(`SELECT coalesce(card_brand,'Not recorded') AS brand, count(*)::int AS n, coalesce(sum(total_cents),0)::int AS v
+       FROM orders WHERE shift_id=$1 AND status='paid' AND payment_method='card' GROUP BY 1 ORDER BY 3 DESC`),
     q(`SELECT kind, coalesce(sum(amount_cents),0)::int AS v FROM cash_movements WHERE shift_id=$1 GROUP BY 1`),
     q(`SELECT count(*)::int AS count, coalesce(sum(amount_cents),0)::int AS amount_cents FROM item_voids WHERE shift_id=$1`),
     q(`SELECT count(*)::int AS n FROM orders WHERE shift_id=$1 AND status='void'`),
@@ -688,7 +726,7 @@ async function shiftSummary(c, shiftId) {
   const cashOut = (cash.find((x) => x.kind === 'out') || { v: 0 }).v;
   const expected = shift.float_cents + payments.cash - refunds.cash + cashIn - cashOut;
   return {
-    shift, sales, payments, refunds, expected_cents: expected,
+    shift, sales, payments, refunds, expected_cents: expected, card_brands: cardBrands,
     cash: { in_cents: cashIn, out_cents: cashOut, movements },
     voids: { ...voids, orders: voidOrders.n }, refund_list: refundList, open_orders: open[0].n,
   };
@@ -799,8 +837,13 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 (async () => {
-  await migrate();
+  await migrate({ seed: MODE !== 'mirror' }); // the cloud copy gets its data from the shop server
+  await sync.setup();
+  await sync.repairSequences();
   await loadSettings();
   await startListener();
+  sync.start();
+  if (PRINT_DIRECT) printing.startDirect();
+  console.log(`Mode: ${MODE}${MODE === 'local' ? ` · cloud copy: ${CLOUD_URL || 'not set'} · printing: ${PRINT_DIRECT ? 'direct' : 'via bridge'}` : ''}`);
   app.listen(PORT, () => console.log(`POS listening on :${PORT}`));
 })().catch((e) => { console.error(e); process.exit(1); });

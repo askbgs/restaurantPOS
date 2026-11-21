@@ -1,3 +1,10 @@
+/* Archivo is served from this app (works with no internet). SIL Open Font License, see /fonts/OFL-LICENSE.txt */
+@font-face { font-family: 'Archivo'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/archivo-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Archivo'; font-style: normal; font-weight: 500; font-display: swap; src: url('/fonts/archivo-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Archivo'; font-style: normal; font-weight: 600; font-display: swap; src: url('/fonts/archivo-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Archivo'; font-style: normal; font-weight: 700; font-display: swap; src: url('/fonts/archivo-latin-700-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Archivo'; font-style: normal; font-weight: 800; font-display: swap; src: url('/fonts/archivo-latin-800-normal.woff2') format('woff2'); }
+
 :root {
   --bg: #f0efed;
   --panel: #f6f5f3;
@@ -334,6 +341,31 @@ label.check input { width: 20px; height: 20px; accent-color: var(--ink); }
 .bill-preview h3 { text-align: center; margin: 4px 0; font-size: 16px; }
 .bill-preview .c, #print .c { text-align: center; }
 .bill-logo { max-width: 60%; max-height: 90px; object-fit: contain; filter: grayscale(1); }
+
+/* ---------- bill: customer + card ---------- */
+.cust-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.cust-row input, .card-box input { width: 100%; padding: 10px 12px; border: 2px solid #9a9a9a; background: #fff; font-size: 15px; outline: none; border-radius: 0; }
+.cust-row input:focus, .card-box input:focus { border-color: var(--ink); }
+.card-box { margin-top: 14px; }
+.card-box label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.card-box label small { font-weight: 400; }
+.card-chips .chip { min-width: 0; padding: 8px 12px; font-size: 14px; }
+.last4 { display: flex; align-items: center; border: 2px solid #9a9a9a; background: #fff; }
+.last4:focus-within { border-color: var(--ink); }
+.last4 span { padding: 0 4px 0 12px; color: var(--muted); letter-spacing: 2px; }
+.last4 input { border: 0 !important; font-size: 18px !important; letter-spacing: 3px; font-weight: 700; padding-left: 6px !important; }
+
+/* ---------- offline / sync ---------- */
+.brand b, .brand small { white-space: nowrap; }
+.sync-pill { font-size: 12.5px; font-weight: 700; padding: 5px 10px; border: 1px solid var(--soft); white-space: nowrap; color: var(--muted); }
+.sync-pill.ok { color: #1f7a3a; border-color: #9fd2ad; background: #eef8f1; }
+.sync-pill.busy { color: var(--ink); }
+.sync-pill.off { color: #8a5200; border-color: #f0c27a; background: #fff6e6; }
+.mirror-bar { background: #1b1b1b; color: #f0efed; padding: 8px 20px; font-size: 14px; flex: none; }
+.sync-box { border: 1px solid var(--line); background: var(--panel); padding: 12px 16px; margin-bottom: 26px; max-width: 640px; }
+.sync-box .r { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 14.5px; border-bottom: 1px solid var(--soft); }
+.sync-box .r:last-child { border-bottom: 0; }
+@media (max-width: 1000px) { .sync-pill { display: none; } }
 
 /* ---------- stock ---------- */
 .stk { display: inline-block; font-size: 11.5px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; padding: 2px 7px; border: 1px solid currentColor; }

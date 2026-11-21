@@ -337,3 +337,8 @@ CREATE TABLE IF NOT EXISTS stock_moves (
 CREATE INDEX IF NOT EXISTS stock_moves_ing_idx ON stock_moves(ingredient_id, id DESC);
 CREATE INDEX IF NOT EXISTS stock_moves_created_idx ON stock_moves(created_at);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_deducted BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- v9: card details for card payments (card type + last 4 digits only — never the full number)
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS card_brand TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS card_last4 CHAR(4);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS card_auth TEXT;

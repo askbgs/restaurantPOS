@@ -12,6 +12,7 @@ A restaurant point-of-sale and kitchen order ticket (KOT) system built from the 
 | **Review KOT** | Previews the tickets before sending, either **per station** (Wok / Steam / Grill / Cold / Bar) or as a **single ticket**. **Hold mains & desserts** sends them to *On hold* until the kitchen fires them. Add-on tickets are flagged. |
 | **Kitchen** | KDS board with New → Cooking → Ready → cleared, plus an On hold column ("Fire now"). Station filter with live counts. Tap an item to tick it off. Tickets cooking longer than `LATE_MINUTES` turn red and show LATE. |
 | **Bill** | Discount (None / 10% / Staff 20%), service charge on/off, tip, split 2–4 ways, and Card / Cash / Wallet with a change calculator. Warns about unsent items. **Print bill** prints an 80 mm receipt. **Charge** sends any unsent items to the kitchen, closes the order and frees the table. |
+| **Bill: customer & card** | **Customer name and contact no.** can be added on any bill (dine-in too) and print on bills and receipts. For **card payments** the cashier taps the card type (Visa, Mastercard, Amex, UnionPay, JCB, Other) and enters the **last 4 digits**, plus the optional **approval code** from the terminal slip. The card type can't be worked out from the last 4 digits; it comes from the card's first digits. Only the type and last 4 digits are stored, never the full number. The receipt shows `Visa **** 4242`. The Z report and Reports split card payments by type so you can match them with the card machine settlement. |
 | **Admin** (Managers only) | **Menu items**: add or edit dishes with price, category, station, tags, spice option, add-ons and a **photo**; hide a dish from the menu. Photos are resized to 800 px in the browser and stored in Postgres, so they survive redeploys. **Categories** set the default course. **Floor & tables**: add areas and tables, set seats, hide tables. **Stations** set the KOT routing and printer label. **Staff**: names, roles, PINs, and turning sign-in off. |
 | **History** | Today's orders with type filter, paid count and amount collected. A detail panel shows the items and kitchen tickets. |
 
@@ -103,6 +104,23 @@ If no printer is configured, the browser print dialog is used as before.
 
 To start the bridge automatically when Windows starts, put the command in a `.bat` file in the Startup folder, or use `pm2` / NSSM.
 
+## Works without internet: shop server + cloud copy
+
+Run the POS on a PC in the restaurant (`POS_MODE=local`). Ordering, kitchen tickets, printing and
+payments then keep working when the internet is down, and every change syncs to Railway
+(`POS_MODE=mirror`, read-only) whenever the connection is up. **Full setup: [SHOP-SERVER.md](SHOP-SERVER.md).**
+
+| `POS_MODE` | Where | What it does |
+|---|---|---|
+| `standalone` (default) | anywhere | One server used directly. This is how it worked before. |
+| `local` | shop PC | The master copy. Works offline, prints directly to network printers, queues changes and uploads them to `CLOUD_URL`. |
+| `mirror` | Railway | Read-only cloud copy for Reports, History and Stock from anywhere. Receives changes at `/sync/ingest` (needs `SYNC_TOKEN`). |
+
+Extra variables: `CLOUD_URL` (local), `SYNC_TOKEN` (both, same value), `PRINT_DIRECT` (default on in local mode).
+Shop PC files: `docker-compose.yml` (Postgres + POS + nightly backup), `Dockerfile`, `.env.shop.example`,
+`start-shop-server.bat` (no-Docker option). The Archivo font is now served by the app itself, so
+nothing on screen needs the internet.
+
 ## Deploy on Railway
 
 1. Push this folder to a GitHub repo.
@@ -144,6 +162,7 @@ server/index.js    Express API, auth, SSE, static hosting
 server/admin.js    manager-only admin API + audit log
 server/printing.js print queue, receipt layouts, bridge API
 server/reports.js  sales + food-cost reports
+server/sync.js     offline-first sync: change queue, upload worker, cloud copy ingest
 server/inventory.js  ingredients, recipes, stock ledger, suppliers, purchases
 server/inventory-sample.js  sample ingredients and recipes
 bridge/print-bridge.js  runs on a shop PC, sends ESC/POS to printers

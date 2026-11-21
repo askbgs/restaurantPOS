@@ -23,7 +23,8 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((a, v, i, all) => {
 }, []));
 const SERVER = String(args.server || process.env.POS_SERVER || '').replace(/\/+$/, '');
 const TOKEN = String(args.token || process.env.POS_BRIDGE_TOKEN || '');
-if (!SERVER || !TOKEN) {
+const RUN_AS_BRIDGE = require.main === module; // when required by the POS server, only the printing functions are used
+if (RUN_AS_BRIDGE && (!SERVER || !TOKEN)) {
   console.error('Usage: node print-bridge.js --server https://your-pos.example.com --token BRIDGE_TOKEN');
   process.exit(1);
 }
@@ -132,7 +133,7 @@ async function handle(job) {
   }
 }
 
-(async function main() {
+if (RUN_AS_BRIDGE) (async function main() {
   log(`Print bridge connected to ${SERVER}. Waiting for jobs… (Ctrl+C to stop)`);
   let backoff = 1000;
   for (;;) {
@@ -156,3 +157,4 @@ async function handle(job) {
   }
 })();
 
+module.exports = { render, sendNetwork, sendShare };

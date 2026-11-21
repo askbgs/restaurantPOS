@@ -26,7 +26,7 @@ module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG }) {
 
     const [
       [k], [ref], [vd], [vo], byHour, byDay, byType, byPay, refByMethod, byCat, items, slow, staff, tables, voids, refunds, discounts,
-      [stk], dishCost, wasteList,
+      [stk], dishCost, wasteList, cardBrands,
     ] = await Promise.all([
       q(`SELECT count(*)::int AS orders, coalesce(sum(total_cents),0)::bigint AS gross_cents, coalesce(sum(subtotal_cents),0)::bigint AS subtotal_cents,
                 coalesce(sum(discount_cents),0)::bigint AS discount_cents, coalesce(sum(service_cents),0)::bigint AS service_cents,
@@ -92,6 +92,8 @@ module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG }) {
       q(`SELECT m.created_at, g.name, g.unit, -m.change AS qty, m.value_cents, m.note, s.name AS staff_name
          FROM stock_moves m JOIN ingredients g ON g.id=m.ingredient_id LEFT JOIN staff s ON s.id=m.staff_id
          WHERE m.kind='waste' AND ${inRange('m.created_at')} ORDER BY m.id DESC LIMIT 100`),
+      q(`SELECT coalesce(card_brand,'Not recorded') AS brand, count(*)::int AS orders, coalesce(sum(total_cents),0)::bigint AS cents
+         FROM orders o WHERE ${PAID} AND payment_method='card' GROUP BY 1 ORDER BY 3 DESC`),
     ]);
 
     const n = (v) => Number(v);
@@ -139,6 +141,7 @@ module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG }) {
           profit_cents: x.has_recipe ? n(x.cents) - cost : null, margin_pct: x.has_recipe && n(x.cents) ? Math.round(((n(x.cents) - cost) / n(x.cents)) * 1000) / 10 : null };
       }),
       waste: wasteList.map((x) => ({ ...x, value_cents: n(x.value_cents) })),
+      card_brands: cardBrands.map((x) => ({ ...x, cents: n(x.cents) })),
     });
   }));
 
