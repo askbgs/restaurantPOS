@@ -365,3 +365,7 @@ CREATE TABLE IF NOT EXISTS n8n_events (
   sent_at      TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS n8n_events_due ON n8n_events (next_try_at) WHERE status = 'pending';
+
+-- v13: dish names in Tamil and Sinhala, for bills printed in those languages
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS name_ta TEXT;
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS name_si TEXT;

@@ -5,6 +5,8 @@
 const crypto = require('crypto');
 const path = require('path');
 const express = require('express');
+const bt = require('./billtext');
+const { rasterizeDoc } = require('./raster');
 
 module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, HttpError }) {
   const bad = (msg) => { throw new HttpError(400, msg); };
@@ -34,6 +36,10 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
   // Queue a job; the NOTIFY is delivered when the surrounding transaction commits.
   async function enqueue(c, printerId, kind, jobTitle, doc) {
     if (!printerId) return null;
+    if (bt.needsRaster(JSON.stringify(doc))) {
+      const { rows: [p] } = await c.query('SELECT width_chars FROM printers WHERE id=$1', [printerId]);
+      doc = rasterizeDoc(doc, p?.width_chars || 48);
+    }
     const { rows: [j] } = await c.query('INSERT INTO print_jobs(printer_id, kind, title, doc) VALUES ($1,$2,$3,$4) RETURNING id',
       [printerId, kind, jobTitle, JSON.stringify(doc)]);
     await c.query("SELECT pg_notify('pos_events', 'print')");
@@ -42,15 +48,17 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
 
   // ---------- documents ----------
   // Logo, name, address, contact and registration no. at the top of every customer-facing slip
-  function brandHeader({ terminal = true } = {}) {
-    const d = [];
+  // Restaurant name / address / footer in the bill's language, when set in Admin → Settings
+  const local = (key, lang) => (lang === 'ta' && CONFIG[key + 'Ta']) || (lang === 'si' && CONFIG[key + 'Si']) || CONFIG[key];
+  function brandHeader({ terminal = true, lang = 'en' } = {}) {
+    const d = []; const L = bt.T(lang);
     if (CONFIG.logoRaster) d.push({ t: 'image', w: CONFIG.logoRaster.w, h: CONFIG.logoRaster.h, data: CONFIG.logoRaster.data, align: 'center' });
-    d.push({ t: 'text', s: CONFIG.restaurant, align: 'center', bold: true, size: 2 });
-    for (const line of String(CONFIG.address || '').split('\n').filter(Boolean)) d.push({ t: 'text', s: line, align: 'center' });
-    if (CONFIG.phone) d.push({ t: 'text', s: `Tel: ${CONFIG.phone}`, align: 'center' });
+    d.push({ t: 'text', s: local('restaurant', lang), align: 'center', bold: true, size: 2 });
+    for (const line of String(local('address', lang) || '').split('\n').filter(Boolean)) d.push({ t: 'text', s: line, align: 'center' });
+    if (CONFIG.phone) d.push({ t: 'text', s: `${L.tel}: ${CONFIG.phone}`, align: 'center' });
     const web = [CONFIG.email, CONFIG.website].filter(Boolean).join(' · ');
     if (web) d.push({ t: 'text', s: web, align: 'center' });
-    if (CONFIG.regNo) d.push({ t: 'text', s: `Reg. No: ${CONFIG.regNo}`, align: 'center' });
+    if (CONFIG.regNo) d.push({ t: 'text', s: `${L.regNo}: ${CONFIG.regNo}`, align: 'center' });
     if (terminal && CONFIG.terminal) d.push({ t: 'text', s: CONFIG.terminal, align: 'center' });
     return d;
   }
@@ -94,48 +102,53 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
     ];
   }
 
-  function billDoc(o, { label = 'BILL', refunds = [] } = {}) {
-    const d = brandHeader();
-    if (label !== 'BILL') d.push({ t: 'text', s: `*** ${label} ***`, align: 'center', bold: true });
+  // label: 'bill' | 'billCopy' | 'receiptCopy'; lang: 'en' | 'ta' | 'si'
+  function billDoc(o, { label = 'bill', refunds = [], lang = CONFIG.billLang } = {}) {
+    lang = bt.lang(lang); const L = bt.T(lang); const en = lang === 'en';
+    const d = brandHeader({ lang });
+    if (label !== 'bill') d.push({ t: 'text', s: `*** ${L[label] || label} ***`, align: 'center', bold: true });
+    const head = o.type === 'dinein' ? `${L.table} ${o.table_code}` : `${L.types[o.type] || o.type} #${o.order_no}`;
     d.push({ t: 'hr' },
-      { t: 'row', l: title(o), r: `#${o.order_no}`, bold: true },
+      { t: 'row', l: head, r: `#${o.order_no}`, bold: true },
       { t: 'text', s: when(o.closed_at || undefined) },
-      { t: 'text', s: `Server: ${o.staff_name || ''}${o.type === 'dinein' ? ` · Guests: ${o.guests}` : ''}` });
-    if (o.customer_name) d.push({ t: 'text', s: `Customer: ${o.customer_name}` });
-    if (o.phone) d.push({ t: 'text', s: `Contact: ${o.phone}` });
-    if (o.type === 'delivery' && o.address) d.push({ t: 'text', s: `Deliver to: ${o.address}` });
+      { t: 'text', s: `${L.server}: ${o.staff_name || ''}${o.type === 'dinein' ? ` · ${L.guests}: ${o.guests}` : ''}` });
+    if (o.customer_name) d.push({ t: 'text', s: `${L.customer}: ${o.customer_name}` });
+    if (o.phone) d.push({ t: 'text', s: `${L.contact}: ${o.phone}` });
+    if (o.type === 'delivery' && o.address) d.push({ t: 'text', s: `${L.deliverTo}: ${o.address}` });
     d.push({ t: 'hr' });
     for (const i of o.items) {
       const q = i.qty - (i.void_qty || 0);
       if (q <= 0) continue;
       // dish at its own price, then each add-on with its price, so the lines add up to the subtotal
-      d.push({ t: 'row', l: `${q} x ${i.name}`, r: money(q * i.unit_price_cents) });
-      if (i.spice) d.push({ t: 'text', s: `    Spice: ${i.spice}` });
+      d.push({ t: 'row', l: `${q} x ${bt.itemName(i, lang)}`, r: money(q * i.unit_price_cents) });
+      if (i.spice) d.push({ t: 'text', s: `    ${L.spice}: ${L.spiceLevels[i.spice] || i.spice}` });
       for (const a of i.addons || []) {
-        d.push({ t: 'row', l: `    + ${addonLabel(a, q * aq(a))}`, r: money(q * aq(a) * a.price_cents) });
+        const n = q * aq(a);
+        d.push({ t: 'row', l: `    + ${en ? addonLabel(a, n) : `${a.name}${n > 1 ? ` × ${n}` : ''}`}`, r: money(n * a.price_cents) });
       }
     }
-    d.push({ t: 'hr' }, { t: 'row', l: 'Subtotal', r: money(o.subtotal_cents) });
-    if (o.discount_cents) d.push({ t: 'row', l: `Discount ${o.discount_pct}%`, r: '-' + money(o.discount_cents) });
-    if (o.service_on && o.service_cents) d.push({ t: 'row', l: `Service ${pct(CONFIG.serviceRate)}`, r: money(o.service_cents) });
+    d.push({ t: 'hr' }, { t: 'row', l: L.subtotal, r: money(o.subtotal_cents) });
+    if (o.discount_cents) d.push({ t: 'row', l: `${L.discount} ${o.discount_pct}%`, r: '-' + money(o.discount_cents) });
+    if (o.service_on && o.service_cents) d.push({ t: 'row', l: `${L.service} ${pct(CONFIG.serviceRate)}`, r: money(o.service_cents) });
     d.push({ t: 'row', l: `${CONFIG.taxLabel} ${pct(CONFIG.taxRate)}`, r: money(o.tax_cents) });
-    if (o.tip_cents) d.push({ t: 'row', l: `Tip ${o.tip_pct}%`, r: money(o.tip_cents) });
-    d.push({ t: 'hr' }, { t: 'row', l: 'TOTAL', r: money(o.total_cents), bold: true, size: 2 });
-    if (o.split_ways > 1) d.push({ t: 'row', l: `Per person (${o.split_ways})`, r: money(Math.ceil(o.total_cents / o.split_ways)) });
+    if (o.tip_cents) d.push({ t: 'row', l: `${L.tip} ${o.tip_pct}%`, r: money(o.tip_cents) });
+    d.push({ t: 'hr' }, { t: 'row', l: L.total, r: money(o.total_cents), bold: true, size: 2 });
+    if (o.split_ways > 1) d.push({ t: 'row', l: `${L.perPerson} (${o.split_ways})`, r: money(Math.ceil(o.total_cents / o.split_ways)) });
     if (o.status === 'paid') {
-      d.push({ t: 'row', l: 'Paid by', r: (o.payment_method || '').toUpperCase() });
+      d.push({ t: 'row', l: L.paidBy, r: L.methods[o.payment_method] || (o.payment_method || '').toUpperCase() });
       if (o.payment_method === 'card' && o.card_last4) {
-        d.push({ t: 'row', l: 'Card', r: `${o.card_brand || ''} **** ${o.card_last4}` });
-        if (o.card_auth) d.push({ t: 'row', l: 'Approval code', r: o.card_auth });
+        d.push({ t: 'row', l: L.card, r: `${o.card_brand || ''} **** ${o.card_last4}` });
+        if (o.card_auth) d.push({ t: 'row', l: L.approval, r: o.card_auth });
       }
       if (o.payment_method === 'cash' && o.cash_received_cents != null) {
-        d.push({ t: 'row', l: 'Cash received', r: money(o.cash_received_cents) });
-        d.push({ t: 'row', l: 'Change', r: money(o.change_cents || 0) });
+        d.push({ t: 'row', l: L.cashReceived, r: money(o.cash_received_cents) });
+        d.push({ t: 'row', l: L.change, r: money(o.change_cents || 0) });
       }
     }
-    for (const r of refunds) d.push({ t: 'row', l: `Refund (${r.method})`, r: '-' + money(r.amount_cents) });
+    for (const r of refunds) d.push({ t: 'row', l: `${L.refund} (${L.methods[r.method] || r.method})`, r: '-' + money(r.amount_cents) });
     d.push({ t: 'hr' });
-    if (CONFIG.billFooter) d.push({ t: 'text', s: CONFIG.billFooter, align: 'center' });
+    const footer = en ? CONFIG.billFooter : local('billFooter', lang) !== CONFIG.billFooter ? local('billFooter', lang) : L.footer;
+    if (footer) d.push({ t: 'text', s: footer, align: 'center' });
     d.push({ t: 'feed', n: 3 }, { t: 'cut' });
     return d;
   }

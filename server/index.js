@@ -5,11 +5,12 @@ const { pool, tx, migrate, hashPin, checkPin, startListener, notify, listeners }
 const adminRouter = require('./admin');
 const createPrinting = require('./printing');
 const createIntegrations = require('./integrations');
+const billtext = require('./billtext');
 const reportsRouter = require('./reports');
 const createInventory = require('./inventory');
 
 const CONFIG = {
-  restaurant: process.env.RESTAURANT_NAME || 'Ember & Bao',
+  restaurant: process.env.RESTAURANT_NAME || 'Virundhu & Co',
   terminal: process.env.TERMINAL_NAME || 'Terminal 2',
   currency: process.env.CURRENCY_SYMBOL || 'Rs ',
   taxLabel: process.env.TAX_LABEL || 'VAT',
@@ -19,6 +20,8 @@ const CONFIG = {
   timezone: process.env.TZ_DISPLAY || 'Asia/Colombo',
   // business details printed on bills (set in Admin → Settings)
   address: '', phone: '', email: '', website: '', regNo: '', billFooter: 'Thank you! Come again.',
+  // bill language (en | ta | si) and the restaurant's own wording in Tamil and Sinhala (optional)
+  billLang: 'en', restaurantTa: '', addressTa: '', billFooterTa: '', restaurantSi: '', addressSi: '', billFooterSi: '',
   logoRaster: null, // 1-bit logo for thermal printers: { w, h, data (base64, packed rows) }
 };
 const ENV_CONFIG = { ...CONFIG };
@@ -116,8 +119,9 @@ async function loadOrder(id, client = pool) {
   const { rows: [o] } = await client.query(`${ORDER_SUMMARY_SQL} WHERE o.id=$1`, [id]);
   if (!o) throw new HttpError(404, 'Order not found');
   const { rows: items } = await client.query(
-    `SELECT i.*, k.kot_no, k.status AS kot_status, st.name AS station_name
+    `SELECT i.*, k.kot_no, k.status AS kot_status, st.name AS station_name, m.name_ta, m.name_si
      FROM order_items i LEFT JOIN kots k ON k.id=i.kot_id LEFT JOIN stations st ON st.id=i.station_id
+     LEFT JOIN menu_items m ON m.id=i.menu_item_id
      WHERE i.order_id=$1 ORDER BY i.id`, [id]);
   const { rows: kots } = await client.query(
     `SELECT k.*, st.name AS station_name FROM kots k LEFT JOIN stations st ON st.id=k.station_id
@@ -173,7 +177,7 @@ app.get('/api/config', wrap(async (req, res) => {
   const { rows } = await pool.query("SELECT key, extract(epoch FROM updated_at)::bigint AS v FROM app_images WHERE key IN ('login_bg','logo')");
   const ver = Object.fromEntries(rows.map((r) => [r.key, r.v]));
   const { logoRaster, ...pub } = CONFIG;
-  res.json({ ...pub, mode: MODE, printDirect: PRINT_DIRECT,
+  res.json({ ...pub, mode: MODE, printDirect: PRINT_DIRECT, billText: billtext.TEXT,
     loginBg: ver.login_bg ? `/login-bg?v=${ver.login_bg}` : '/img/login-bg.jpg', logo: ver.logo ? `/logo?v=${ver.logo}` : null });
 }));
 
@@ -490,7 +494,7 @@ app.post('/api/orders/:id/print-bill', wrap(async (req, res) => {
     const o = await loadOrder(id, c);
     await audit(c, { action: 'bill.print', staffId: req.user.id, orderId: id, summary: `Bill printed for ${otitle(o)} · ${o.total_cents / 100}` });
     const pid = await printing.printerFor(c, 'bill');
-    return pid ? !!(await printing.enqueue(c, pid, 'bill', `Bill · ${otitle(o)}`, printing.billDoc(o))) : false;
+    return pid ? !!(await printing.enqueue(c, pid, 'bill', `Bill · ${otitle(o)}`, printing.billDoc(o, { lang: req.body.lang }))) : false;
   });
   notify('floor');
   res.json({ ...(await loadOrder(id)), printed_to_printer: printed });
@@ -504,7 +508,7 @@ app.post('/api/orders/:id/reprint', wrap(async (req, res) => {
     await audit(c, { action: 'bill.reprint', staffId: req.user.id, orderId: id, summary: `Receipt reprinted for ${otitle(o)}` });
     const pid = await printing.printerFor(c, 'bill');
     return pid ? !!(await printing.enqueue(c, pid, 'bill', `Receipt copy · ${otitle(o)}`,
-      printing.billDoc(o, { label: o.status === 'paid' ? 'RECEIPT COPY' : 'BILL COPY', refunds: o.refunds }))) : false;
+      printing.billDoc(o, { label: o.status === 'paid' ? 'receiptCopy' : 'billCopy', refunds: o.refunds, lang: req.body.lang }))) : false;
   });
   res.json({ ...(await loadOrder(id)), printed_to_printer: printed });
 }));

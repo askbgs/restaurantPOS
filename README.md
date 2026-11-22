@@ -1,4 +1,4 @@
-# Restaurant POS & KOT (Ember & Bao)
+# Restaurant POS & KOT (Virundhu & Co)
 
 A restaurant point-of-sale and kitchen order ticket (KOT) system built from the Claude Design
 "Restaurant POS" mock-up. One Node.js service serves the API and the web app, with PostgreSQL behind it.
@@ -104,6 +104,15 @@ If no printer is configured, the browser print dialog is used as before.
 
 To start the bridge automatically when Windows starts, put the command in a `.bat` file in the Startup folder, or use `pm2` / NSSM.
 
+## Bills in Tamil and Sinhala
+
+- **Printing a bill:** on the Bill screen, staff pick **English / தமிழ் / සිංහල** next to Print bill. Reprints in History have the same choice.
+- **Default language:** set in Admin → Settings → *Bills in Tamil & Sinhala*. The restaurant name, address and footer message can each have a Tamil and a Sinhala version; empty fields fall back to the English wording. Labels such as Table, Subtotal and Total are translated automatically.
+- **Dish names:** each dish has optional *Name in Tamil* and *Name in Sinhala* fields (Admin → Menu items). A dish with no local name prints in English. Add-on names print as entered.
+- **Thermal printers:** these can't print Tamil or Sinhala text themselves, so the server draws the bill as a picture (`server/raster.js`, using `@napi-rs/canvas` and the Noto fonts in `server/fonts/`) and sends it the same way as the logo. This works with any ESC/POS printer that prints the logo, both through the print bridge and with direct printing. English bills still print as text.
+- **Printing from the browser:** when no printer is set up, the browser bill uses the bundled Noto Sans Tamil and Noto Sans Sinhala fonts. It waits for them to load before the print dialog opens.
+- **Kitchen tickets:** KOTs stay in English.
+
 ## Email reports with n8n (Admin → Integrations)
 
 When a shift closes, the POS sends the Z-report to an n8n workflow, and n8n emails it to the owner. If the counted cash is over or short by more than a limit you set, a separate **Cash variance** alert email goes out too.
@@ -183,6 +192,8 @@ How totals are calculated: subtotal − discount = base. Service, tax and tip ar
 server/index.js    Express API, auth, SSE, static hosting
 server/admin.js    manager-only admin API + audit log
 server/printing.js print queue, receipt layouts, bridge API
+server/billtext.js bill wording in English, Tamil and Sinhala
+server/raster.js   draws Tamil/Sinhala bills as an image for thermal printers (fonts in server/fonts/)
 server/reports.js  sales + food-cost reports
 server/sync.js     offline-first sync: change queue, upload worker, cloud copy ingest
 server/integrations.js  n8n events: outbox, signed webhook delivery, Admin → Integrations API
@@ -199,7 +210,6 @@ public/            web app (index.html, app.js, styles.css) — no build step
 
 ## Not included yet
 
-- Sinhala and Tamil text on thermal printers. The printer code page is ASCII, so those characters print as '?'.
 - Add-ons (extra cheese, fried egg…) don't deduct stock. Only the dish recipe does.
 - Unit conversion between purchase and recipe units. Each ingredient uses one unit (e.g. buy and use chicken in kg).
 - Editing or cancelling a saved delivery. Correct mistakes with a stock adjustment and a supplier payment.

@@ -455,6 +455,7 @@
           </div>
           <div class="due">
             <div class="r"><span>Amount due</span><b>${money(o.total_cents)}</b></div>
+            <div class="bill-lang" role="group" aria-label="Bill language"><span>Print bill in</span>${billLangButtons()}</div>
             <div class="acts">
               <button type="button" class="btn" data-act="print-bill" ${o.items.length ? '' : 'disabled'}>Print bill</button>
               <button type="button" class="btn red" data-act="charge" ${o.items.length ? '' : 'disabled'}>Charge ${money(o.total_cents)}</button>
@@ -511,7 +512,8 @@
               ${d.status === 'paid' ? `<div style="margin-top:8px"><b>${money(d.total_cents)}</b> · ${esc((d.payment_method || '').toUpperCase())}${d.card_last4 ? ` · ${esc(d.card_brand || '')} •••• ${esc(d.card_last4)}${d.card_auth ? ` · auth ${esc(d.card_auth)}` : ''}` : ''}${d.cash_received_cents != null ? ` · received ${money(d.cash_received_cents)}, change ${money(d.change_cents || 0)}` : ''}${d.refunded_cents ? ` · <span class="note-red">refunded ${money(d.refunded_cents)}</span>` : ''}</div>` : ''}
               <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
                 ${d.status === 'paid' && d.refunded_cents < d.total_cents ? `<button type="button" class="btn" data-act="refund" data-id="${d.id}">Refund</button>` : ''}
-                ${d.items.length ? `<button type="button" class="btn" data-act="reprint" data-id="${d.id}">Reprint ${d.status === 'paid' ? 'receipt' : 'bill'}</button>` : ''}</div></div>
+                ${d.items.length ? `<button type="button" class="btn" data-act="reprint" data-id="${d.id}">Reprint ${d.status === 'paid' ? 'receipt' : 'bill'}</button>` : ''}</div>
+                ${d.items.length ? `<div class="bill-lang" role="group" aria-label="Reprint language" style="margin-top:10px"><span>In</span>${billLangButtons()}</div>` : ''}</div>
             <div class="sec"><div class="lbl">ITEMS</div>${d.items.map((i) => `<div class="r ${eq(i) === 0 ? 'voided' : ''}"><span>${eq(i)}</span><span>${esc(i.name)}${i.void_qty ? ` <span class="note-red">(${i.void_qty} voided)</span>` : ''}</span><span>${money(lineTotal(i))}</span></div>`).join('') || '<div class="muted">None</div>'}</div>
             ${d.voids.length ? `<div class="sec"><div class="lbl">VOIDS</div>${d.voids.map((v) => `<div class="note-line"><b>${v.qty} × ${esc(v.name)}</b> · ${money(v.amount_cents)}<div class="muted">${clock(v.created_at)} · ${esc(v.reason)} · ${esc(v.staff_name || '')}${v.approved_name && v.approved_name !== v.staff_name ? ` · approved by ${esc(v.approved_name)}` : ''}</div></div>`).join('')}</div>` : ''}
             ${d.refunds.length ? `<div class="sec"><div class="lbl">REFUNDS</div>${d.refunds.map((r) => `<div class="note-line"><b>${money(r.amount_cents)}</b> · ${esc(r.method)}<div class="muted">${clock(r.created_at)} · ${esc(r.reason)} · ${esc(r.staff_name || '')}${r.approved_name && r.approved_name !== r.staff_name ? ` · approved by ${esc(r.approved_name)}` : ''}</div></div>`).join('')}</div>` : ''}
@@ -572,6 +574,8 @@
     if (s.kind === 'item') {
       rec = find(D.items) || { name: '', category_id: A.cat !== 'all' ? +A.cat : D.categories[0]?.id, station_id: D.stations[0]?.id, price_cents: 0, tags: [], has_spice: false, active: true, sort: 0, addons: [] };
       body = field('Dish name', inp('name', rec.name, 'required maxlength="80"'))
+        + `<div class="two lang-field">${field('Name in Tamil', inp('name_ta', rec.name_ta || '', 'maxlength="80" lang="ta" placeholder="e.g. சிக்கன் கொத்து"'), 'Used on Tamil bills.')}
+             ${field('Name in Sinhala', inp('name_si', rec.name_si || '', 'maxlength="80" lang="si" placeholder="e.g. චිකන් කොත්තු"'), 'Used on Sinhala bills.')}</div>`
         + `<div class="two">${field('Category', sel('category_id', D.categories.map((c) => [c.id, c.name]), rec.category_id))}
              ${field('Kitchen station', sel('station_id', D.stations.map((x) => [x.id, x.name]), rec.station_id))}</div>`
         + `<div class="two">${field(`Price (${esc(S.cfg.currency.trim())})`, inp('price', major(rec.price_cents), 'inputmode="decimal" required'))}
@@ -700,6 +704,17 @@
           <div class="two">${field('Website', inp('website', st.website, 'maxlength="80" placeholder="www.example.lk"'))}
             ${field('VAT / business reg. no.', inp('regNo', st.regNo, 'maxlength="60"'), 'Printed as "Reg. No".')}</div>
           ${field('Bill footer message', inp('billFooter', st.billFooter, 'maxlength="120" placeholder="Thank you! Come again."'))}
+          <h3 style="margin:22px 0 6px">Bills in Tamil &amp; Sinhala</h3>
+          <div class="muted" style="margin-bottom:12px">Staff can print each bill in English, Tamil or Sinhala from the Bill screen. Dish names come from each dish's Tamil and Sinhala names (Admin → Menu items). Leave a field empty to use the English wording.</div>
+          ${field('Default bill language', `<select name="billLang">${[['en', 'English'], ['ta', 'தமிழ் (Tamil)'], ['si', 'සිංහල (Sinhala)']].map(([v, t]) => `<option value="${v}" ${(st.billLang || 'en') === v ? 'selected' : ''}>${t}</option>`).join('')}</select>`)}
+          <div class="two lang-field">
+            <div>${field('Restaurant name in Tamil', inp('restaurantTa', st.restaurantTa || '', 'maxlength="60" lang="ta"'))}
+              ${field('Address in Tamil', `<textarea name="addressTa" rows="3" maxlength="200" lang="ta">${esc(st.addressTa || '')}</textarea>`)}
+              ${field('Footer message in Tamil', inp('billFooterTa', st.billFooterTa || '', `maxlength="120" lang="ta" placeholder="${esc(BT('ta').footer || '')}"`))}</div>
+            <div>${field('Restaurant name in Sinhala', inp('restaurantSi', st.restaurantSi || '', 'maxlength="60" lang="si"'))}
+              ${field('Address in Sinhala', `<textarea name="addressSi" rows="3" maxlength="200" lang="si">${esc(st.addressSi || '')}</textarea>`)}
+              ${field('Footer message in Sinhala', inp('billFooterSi', st.billFooterSi || '', `maxlength="120" lang="si" placeholder="${esc(BT('si').footer || '')}"`))}</div>
+          </div>
           <button type="submit" class="btn red" style="min-width:200px;text-align:center">Save settings</button>
         </form>
         <div class="settings-form" style="margin-top:8px;border-top:1px solid var(--line);padding-top:22px">
@@ -1570,21 +1585,31 @@
     return [...groups.values()];
   }
 
+  // ---------- bill language (English / Tamil / Sinhala) ----------
+  const BILL_LANGS = ['en', 'ta', 'si'];
+  const billLang = () => (BILL_LANGS.includes(S.billLang) ? S.billLang : (S.cfg.billLang || 'en'));
+  const BT = (l = billLang()) => (S.cfg.billText && S.cfg.billText[l]) || (S.cfg.billText && S.cfg.billText.en) || {};
+  const billLangButtons = () => BILL_LANGS.map((l) => `<button type="button" class="${billLang() === l ? 'on' : ''}" data-act="bill-lang" data-v="${l}" aria-pressed="${billLang() === l}">${esc(BT(l).langName || l)}</button>`).join('');
+  const localName = (i, l) => (l === 'ta' && i.name_ta) || (l === 'si' && i.name_si) || i.name;
+  const localCfg = (key, l, c = S.cfg) => (l === 'ta' && c[key + 'Ta']) || (l === 'si' && c[key + 'Si']) || c[key];
+
   // One bill line: the dish at its own price, then each add-on with its price (they add up to the subtotal)
-  const billLinesHtml = (r) => (i) => {
-    const q = eq(i);
-    return r(`${q} x ${esc(i.name)}`, money(q * i.unit_price_cents))
-      + (i.spice ? `<div class="mod">&nbsp;&nbsp;&nbsp;&nbsp;Spice: ${esc(i.spice)}</div>` : '')
-      + (i.addons || []).map((a) => r(`&nbsp;&nbsp;&nbsp;&nbsp;+ ${esc(addonLabel(a, q * aq(a)))}`, money(q * aq(a) * a.price_cents))).join('');
+  const billLinesHtml = (r, l = 'en') => (i) => {
+    const q = eq(i); const L = BT(l);
+    return r(`${q} x ${esc(localName(i, l))}`, money(q * i.unit_price_cents))
+      + (i.spice ? `<div class="mod">&nbsp;&nbsp;&nbsp;&nbsp;${esc(L.spice || 'Spice')}: ${esc((L.spiceLevels || {})[i.spice] || i.spice)}</div>` : '')
+      + (i.addons || []).map((a) => { const n = q * aq(a);
+        return r(`&nbsp;&nbsp;&nbsp;&nbsp;+ ${esc(l === 'en' ? addonLabel(a, n) : `${a.name}${n > 1 ? ` × ${n}` : ''}`)}`, money(n * a.price_cents)); }).join('');
   };
 
   // Header for browser-printed bills (and the preview in Settings)
-  function billHeaderHtml(c = S.cfg) {
-    const lines = String(c.address || '').split('\n').filter(Boolean);
+  function billHeaderHtml(c = S.cfg, l = 'en') {
+    const L = BT(l);
+    const lines = String(localCfg('address', l, c) || '').split('\n').filter(Boolean);
     return `${S.cfg.logo ? `<div class="c"><img class="bill-logo" src="${esc(S.cfg.logo)}" alt=""></div>` : ''}
-      <h3>${esc(c.restaurant)}</h3>${lines.map((l) => `<div class="c">${esc(l)}</div>`).join('')}
-      ${c.phone ? `<div class="c">Tel: ${esc(c.phone)}</div>` : ''}${c.email || c.website ? `<div class="c">${[c.email, c.website].filter(Boolean).map(esc).join(' · ')}</div>` : ''}
-      ${c.regNo ? `<div class="c">Reg. No: ${esc(c.regNo)}</div>` : ''}${c.terminal ? `<div class="c">${esc(c.terminal)}</div>` : ''}`;
+      <h3>${esc(localCfg('restaurant', l, c))}</h3>${lines.map((x) => `<div class="c">${esc(x)}</div>`).join('')}
+      ${c.phone ? `<div class="c">${esc(L.tel || 'Tel')}: ${esc(c.phone)}</div>` : ''}${c.email || c.website ? `<div class="c">${[c.email, c.website].filter(Boolean).map(esc).join(' · ')}</div>` : ''}
+      ${c.regNo ? `<div class="c">${esc(L.regNo || 'Reg. No')}: ${esc(c.regNo)}</div>` : ''}${c.terminal ? `<div class="c">${esc(c.terminal)}</div>` : ''}`;
   }
   // Turn an uploaded logo into (1) a PNG for the screen and (2) a dithered 1-bit raster for thermal printers.
   async function processLogo(file) {
@@ -1624,26 +1649,33 @@
   }
 
   // ---------- print ----------
-  function printBill(o) {
-    const P = $('#print');
+  async function printBill(o, l = billLang(), label = 'bill') {
+    const P = $('#print'); const L = BT(l); const en = l === 'en';
     const r = (a, b) => `<div class="r"><span>${a}</span><span>${b}</span></div>`;
-    P.innerHTML = `${billHeaderHtml()}<hr>
-      <div>${esc(orderTitle(o))} · Order #${o.order_no}</div><div>${new Date().toLocaleString('en-GB', { timeZone: S.cfg.timezone })}</div>
-      <div>Server: ${esc(o.staff_name || '')}${o.type === 'dinein' ? ` · Guests: ${o.guests}` : ''}</div>
-      ${o.customer_name ? `<div>Customer: ${esc(o.customer_name)}</div>` : ''}${o.phone ? `<div>Contact: ${esc(o.phone)}</div>` : ''}
-      ${o.type === 'delivery' && o.address ? `<div>Deliver to: ${esc(o.address)}</div>` : ''}<hr>
-      ${o.items.filter((i) => eq(i) > 0).map(billLinesHtml(r)).join('')}<hr>
-      ${r('Subtotal', money(o.subtotal_cents))}
-      ${o.discount_cents ? r(`Discount ${o.discount_pct}%`, '-' + money(o.discount_cents)) : ''}
-      ${o.service_on ? r(`Service ${pct(S.cfg.serviceRate)}`, money(o.service_cents)) : ''}
+    const head = o.type === 'dinein' ? `${L.table} ${o.table_code}` : `${(L.types || {})[o.type] || o.type} #${o.order_no}`;
+    const footer = en ? S.cfg.billFooter : (localCfg('billFooter', l) !== S.cfg.billFooter ? localCfg('billFooter', l) : L.footer);
+    P.className = en ? '' : 'local';
+    P.innerHTML = `${billHeaderHtml(S.cfg, l)}<hr>
+      ${label !== 'bill' ? `<div class="c"><b>*** ${esc(L[label] || label)} ***</b></div>` : ''}
+      <div>${esc(head)} · ${esc(L.order)} #${o.order_no}</div><div>${new Date().toLocaleString('en-GB', { timeZone: S.cfg.timezone })}</div>
+      <div>${esc(L.server)}: ${esc(o.staff_name || '')}${o.type === 'dinein' ? ` · ${esc(L.guests)}: ${o.guests}` : ''}</div>
+      ${o.customer_name ? `<div>${esc(L.customer)}: ${esc(o.customer_name)}</div>` : ''}${o.phone ? `<div>${esc(L.contact)}: ${esc(o.phone)}</div>` : ''}
+      ${o.type === 'delivery' && o.address ? `<div>${esc(L.deliverTo)}: ${esc(o.address)}</div>` : ''}<hr>
+      ${o.items.filter((i) => eq(i) > 0).map(billLinesHtml(r, l)).join('')}<hr>
+      ${r(esc(L.subtotal), money(o.subtotal_cents))}
+      ${o.discount_cents ? r(`${esc(L.discount)} ${o.discount_pct}%`, '-' + money(o.discount_cents)) : ''}
+      ${o.service_on ? r(`${esc(L.service)} ${pct(S.cfg.serviceRate)}`, money(o.service_cents)) : ''}
       ${r(`${esc(S.cfg.taxLabel)} ${pct(S.cfg.taxRate)}`, money(o.tax_cents))}
-      ${o.tip_cents ? r(`Tip ${o.tip_pct}%`, money(o.tip_cents)) : ''}<hr>
-      <b>${r('TOTAL', money(o.total_cents))}</b>
-      ${o.split_ways > 1 ? r(`Per person (${o.split_ways})`, money(Math.ceil(o.total_cents / o.split_ways))) : ''}
-      ${o.status === 'paid' ? r('Paid by', esc((o.payment_method || '').toUpperCase())) : ''}
-      ${o.status === 'paid' && o.payment_method === 'card' && o.card_last4 ? r('Card', `${esc(o.card_brand || '')} **** ${esc(o.card_last4)}`) + (o.card_auth ? r('Approval code', esc(o.card_auth)) : '') : ''}
-      ${o.status === 'paid' && o.payment_method === 'cash' && o.cash_received_cents != null ? r('Cash received', money(o.cash_received_cents)) + r('Change', money(o.change_cents || 0)) : ''}
-      <hr>${S.cfg.billFooter ? `<div class="c">${esc(S.cfg.billFooter)}</div>` : ''}`;
+      ${o.tip_cents ? r(`${esc(L.tip)} ${o.tip_pct}%`, money(o.tip_cents)) : ''}<hr>
+      <b>${r(esc(L.total), money(o.total_cents))}</b>
+      ${o.split_ways > 1 ? r(`${esc(L.perPerson)} (${o.split_ways})`, money(Math.ceil(o.total_cents / o.split_ways))) : ''}
+      ${o.status === 'paid' ? r(esc(L.paidBy), esc((L.methods || {})[o.payment_method] || (o.payment_method || '').toUpperCase())) : ''}
+      ${o.status === 'paid' && o.payment_method === 'card' && o.card_last4 ? r(esc(L.card), `${esc(o.card_brand || '')} **** ${esc(o.card_last4)}`) + (o.card_auth ? r(esc(L.approval), esc(o.card_auth)) : '') : ''}
+      ${o.status === 'paid' && o.payment_method === 'cash' && o.cash_received_cents != null ? r(esc(L.cashReceived), money(o.cash_received_cents)) + r(esc(L.change), money(o.change_cents || 0)) : ''}
+      ${label !== 'bill' ? (o.refunds || []).map((x) => r(`${esc(L.refund)} (${esc((L.methods || {})[x.method] || x.method)})`, '-' + money(x.amount_cents))).join('') : ''}
+      <hr>${footer ? `<div class="c">${esc(footer)}</div>` : ''}`;
+    // wait for the Tamil / Sinhala font before the print dialog opens
+    if (!en && document.fonts) { try { await document.fonts.load(`12px "${l === 'ta' ? 'Noto Sans Tamil' : 'Noto Sans Sinhala'}"`, P.textContent); await document.fonts.ready; } catch { /* print anyway */ } }
     window.print();
   }
 
@@ -1799,9 +1831,10 @@
     },
     'pay-method': (d) => { S.payMethod = d.v; render(); if (d.v === 'card' && !S.payCard.brand) $('.card-chips .chip')?.focus(); },
     'card-brand': (d) => { S.payCard.brand = d.v; render(); $('#card-last4')?.focus(); },
+    'bill-lang': (d) => { S.billLang = d.v; render(); },
     'print-bill': async () => {
-      S.order = await api(`/orders/${S.order.id}/print-bill`, { body: {} }); render();
-      if (S.order.printed_to_printer) toast('Bill sent to the printer'); else printBill(S.order);
+      S.order = await api(`/orders/${S.order.id}/print-bill`, { body: { lang: billLang() } }); render();
+      if (S.order.printed_to_printer) toast(`Bill sent to the printer (${BT().langName})`); else printBill(S.order);
     },
     charge: () => {
       const o = S.order;
@@ -1918,8 +1951,8 @@
         } });
     },
     reprint: async (d) => {
-      const o = await api(`/orders/${d.id}/reprint`, { body: {} });
-      if (o.printed_to_printer) toast('Sent to the bill printer'); else printBill(o);
+      const o = await api(`/orders/${d.id}/reprint`, { body: { lang: billLang() } });
+      if (o.printed_to_printer) toast(`Sent to the bill printer (${BT().langName})`); else printBill(o, billLang(), o.status === 'paid' ? 'receiptCopy' : 'billCopy');
     },
     'kot-reprint': async (d) => { await api(`/kots/${d.id}/reprint`, { body: {} }); toast('Ticket sent to the kitchen printer'); },
     'fill-reason': (d) => { const r = $('#modal-form [name="reason"]'); if (r) { r.value = d.v; r.focus(); } },

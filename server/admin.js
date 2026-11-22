@@ -87,7 +87,9 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
       stations: stations.rows, staff: staff.rows, roles: ROLES, courses: COURSES,
       settings: { restaurant: CONFIG.restaurant, terminal: CONFIG.terminal, currency: CONFIG.currency, taxLabel: CONFIG.taxLabel,
         taxRate: CONFIG.taxRate, serviceRate: CONFIG.serviceRate, lateMinutes: CONFIG.lateMinutes,
-        address: CONFIG.address, phone: CONFIG.phone, email: CONFIG.email, website: CONFIG.website, regNo: CONFIG.regNo, billFooter: CONFIG.billFooter } });
+        address: CONFIG.address, phone: CONFIG.phone, email: CONFIG.email, website: CONFIG.website, regNo: CONFIG.regNo, billFooter: CONFIG.billFooter,
+        billLang: CONFIG.billLang, restaurantTa: CONFIG.restaurantTa, addressTa: CONFIG.addressTa, billFooterTa: CONFIG.billFooterTa,
+        restaurantSi: CONFIG.restaurantSi, addressSi: CONFIG.addressSi, billFooterSi: CONFIG.billFooterSi } });
   }));
 
   const done = (res, kind = 'menu') => { notify(kind); res.json({ ok: true }); };
@@ -95,6 +97,7 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
   // ---------- settings ----------
   r.patch('/settings', wrap(async (req, res) => {
     const b = req.body;
+    const addr = (v) => String(v ?? '').replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 3).join('\n').slice(0, 200);
     const pctIn = (v, label) => { const n = Number(v); if (!Number.isFinite(n) || n < 0 || n > 100) bad(`${label} must be 0–100%`); return String(n / 100); };
     const vals = {
       restaurant: need(str(b.restaurant, 40), 'Restaurant name'),
@@ -107,6 +110,9 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
       address: String(b.address ?? '').replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 3).join('\n').slice(0, 160),
       phone: str(b.phone, 60), email: str(b.email, 80), website: str(b.website, 80), regNo: str(b.regNo, 60),
       billFooter: str(b.billFooter, 120),
+      billLang: ['en', 'ta', 'si'].includes(b.billLang) ? b.billLang : 'en',
+      restaurantTa: str(b.restaurantTa, 60), addressTa: addr(b.addressTa), billFooterTa: str(b.billFooterTa, 120),
+      restaurantSi: str(b.restaurantSi, 60), addressSi: addr(b.addressSi), billFooterSi: str(b.billFooterSi, 120),
     };
     await tx(async (c) => {
       for (const [k, v] of Object.entries(vals)) {
@@ -206,6 +212,7 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     if (addons.some((a) => !(a.max_qty >= 1 && a.max_qty <= 20))) bad('Add-on max quantity must be 1–20');
     return {
       name: need(str(b.name, 80), 'Name'),
+      name_ta: str(b.name_ta, 80) || null, name_si: str(b.name_si, 80) || null,
       category_id: need(int(b.category_id), 'Category'),
       station_id: need(int(b.station_id), 'Station'),
       price_cents: price,
@@ -230,9 +237,9 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     const m = itemBody(req.body);
     const id = await tx(async (c) => {
       const { rows: [row] } = await c.query(
-        `INSERT INTO menu_items(category_id, station_id, name, price_cents, tags, has_spice, active, sort, no_kot)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-        [m.category_id, m.station_id, m.name, m.price_cents, tagsFor(m), m.has_spice, m.active, m.sort, m.no_kot]);
+        `INSERT INTO menu_items(category_id, station_id, name, price_cents, tags, has_spice, active, sort, no_kot, name_ta, name_si)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+        [m.category_id, m.station_id, m.name, m.price_cents, tagsFor(m), m.has_spice, m.active, m.sort, m.no_kot, m.name_ta, m.name_si]);
       await saveAddons(c, row.id, m.addons);
       return row.id;
     });
@@ -266,8 +273,9 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     const id = int(req.params.id);
     await tx(async (c) => {
       const u = await c.query(
-        `UPDATE menu_items SET category_id=$2, station_id=$3, name=$4, price_cents=$5, tags=$6, has_spice=$7, active=$8, sort=$9, no_kot=$10 WHERE id=$1`,
-        [id, m.category_id, m.station_id, m.name, m.price_cents, tagsFor(m), m.has_spice, m.active, m.sort, m.no_kot]);
+        `UPDATE menu_items SET category_id=$2, station_id=$3, name=$4, price_cents=$5, tags=$6, has_spice=$7, active=$8, sort=$9, no_kot=$10,
+           name_ta=$11, name_si=$12 WHERE id=$1`,
+        [id, m.category_id, m.station_id, m.name, m.price_cents, tagsFor(m), m.has_spice, m.active, m.sort, m.no_kot, m.name_ta, m.name_si]);
       if (!u.rowCount) throw new HttpError(404, 'Dish not found');
       await saveAddons(c, id, m.addons);
     });
