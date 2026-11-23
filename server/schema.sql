@@ -369,3 +369,15 @@ CREATE INDEX IF NOT EXISTS n8n_events_due ON n8n_events (next_try_at) WHERE stat
 -- v13: dish names in Tamil and Sinhala, for bills printed in those languages
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS name_ta TEXT;
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS name_si TEXT;
+
+-- v14: packages (Basic / Pro / Business): devices signed in on this server, for the plan's device limit.
+-- Not synced: the cloud and a shop PC each count their own devices.
+CREATE TABLE IF NOT EXISTS devices (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL DEFAULT '',
+  first_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_staff  INT,
+  revoked_at  TIMESTAMPTZ
+);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS device_id TEXT;

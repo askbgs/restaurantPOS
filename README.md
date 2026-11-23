@@ -104,6 +104,17 @@ If no printer is configured, the browser print dialog is used as before.
 
 To start the bridge automatically when Windows starts, put the command in a `.bat` file in the Startup folder, or use `pm2` / NSSM.
 
+## Packages: Basic, Pro, Business
+
+Each installation runs on a signed **licence key**. It unlocks the package's features and sets its device and staff limits. Without a key, the POS runs a 14-day free trial with everything.
+- **Basic:** 2 devices, 5 staff, reports for the last 7 days.
+- **Pro:** 5 devices and 20 staff, plus stock, the audit log, email reports and full reports.
+- **Business:** no limits, plus the shop PC backup.
+
+Managers see the plan in **Admin → Plan & licence**, and locked features show an *Upgrade on WhatsApp* button.
+
+Make your signing key once (`npm run license:keygen`), then issue keys with `npm run license:issue`. **Full guide: [LICENSING.md](LICENSING.md).**
+
 ## Bills in Tamil and Sinhala
 
 - **Printing a bill:** on the Bill screen, staff pick **English / தமிழ் / සිංහල** next to Print bill. Reprints in History have the same choice.
@@ -190,6 +201,8 @@ export $(grep -v '^#' .env | xargs) && npm start
 | `SERVICE_RATE` | `0.10` | Service charge fraction |
 | `LATE_MINUTES` | `12` | Cooking time before a ticket shows LATE |
 | `TZ_DISPLAY` | `Asia/Colombo` | Used for times and the "today" filter |
+| `LICENSE_KEY` | (none) | The restaurant's licence key. Optional: it can also be pasted in Admin → Plan & licence |
+| `VENDOR_WHATSAPP` | `94786036092` | Where *Upgrade on WhatsApp* buttons send messages |
 
 How totals are calculated: subtotal − discount = base. Service, tax and tip are each a percentage of the base.
 
@@ -202,6 +215,8 @@ server/printing.js print queue, receipt layouts, bridge API
 server/billtext.js bill wording in English, Tamil and Sinhala
 server/raster.js   draws Tamil/Sinhala bills as an image for thermal printers (fonts in server/fonts/)
 server/reports.js  sales + food-cost reports
+server/license.js  packages (Basic / Pro / Business), licence key check, trial and expiry
+tools/license/     keygen.js (your signing key, once) and issue.js (a key per client)
 server/sync.js     sync between servers: change log, upload/download workers, shop-first and cloud-first modes
 public/start.html  the shop PC's /start page: opens the cloud POS, or the shop PC when the internet is down
 server/integrations.js  n8n events: outbox, signed webhook delivery, Admin → Integrations API

@@ -70,7 +70,9 @@ END $$ LANGUAGE plpgsql;
 
 const rowKey = (tbl, obj) => PK[tbl].map((c) => String(obj[c])).join('|');
 
-module.exports = function createSync({ pool, tx, wrap, HttpError, notify, MODE, CLOUD_URL, SYNC_TOKEN, onRemoteShiftClosed }) {
+module.exports = function createSync({ pool, tx, wrap, HttpError, notify, MODE, CLOUD_URL, SYNC_TOKEN, onRemoteShiftClosed, allowed }) {
+  // the shop PC setups are a plan feature: allowed() returns true, or the message to show
+  async function planCheck() { const ok = allowed ? await allowed() : true; if (ok !== true) throw Object.assign(new HttpError(403, ok), { planBlocked: true }); }
   const CAPTURES = ['local', 'cloud', 'standby'].includes(MODE);
   const SENDS = ['local', 'standby'].includes(MODE) && !!(CLOUD_URL && SYNC_TOKEN);
   const state = { online: null, lastOkAt: null, lastPullAt: null, lastError: null, lastErrorAt: null, sending: false, snapshot: null };
@@ -287,6 +289,7 @@ module.exports = function createSync({ pool, tx, wrap, HttpError, notify, MODE, 
   router.post('/ingest', express.json({ limit: '25mb' }), wrap(async (req, res) => {
     if (!['mirror', 'cloud'].includes(MODE)) throw new HttpError(409, 'This server does not accept uploads (set POS_MODE=cloud or POS_MODE=mirror)');
     checkToken(req);
+    if (MODE === 'cloud') await planCheck();
     const changes = Array.isArray(req.body.changes) ? req.body.changes : [];
     let closed = [];
     await tx(async (c) => {
@@ -307,15 +310,15 @@ module.exports = function createSync({ pool, tx, wrap, HttpError, notify, MODE, 
   }));
 
   // Cloud first: the shop standby reads the cloud's change log from here.
-  const cloudOnly = (req) => { if (MODE !== 'cloud') throw new HttpError(409, 'This server is not the main cloud POS (set POS_MODE=cloud)'); checkToken(req); };
+  const cloudOnly = async (req) => { if (MODE !== 'cloud') throw new HttpError(409, 'This server is not the main cloud POS (set POS_MODE=cloud)'); checkToken(req); await planCheck(); };
   router.get('/head', wrap(async (req, res) => {
-    cloudOnly(req);
+    await cloudOnly(req);
     const { rows: [r] } = await pool.query('SELECT coalesce(max(id),0)::bigint AS id FROM sync_outbox');
     const pruned = Number(await getState(pool, 'pruned_upto') || 0);
     res.json({ cursor: Math.max(Number(r.id), pruned), tables: TABLES.map(([t]) => t) });
   }));
   router.get('/changes', wrap(async (req, res) => {
-    cloudOnly(req);
+    await cloudOnly(req);
     const after = Math.max(0, Number(req.query.after) || 0);
     if (after < Number(await getState(pool, 'pruned_upto') || 0)) return res.json({ resync: true });
     if (Date.now() - seenWritten > 30000) { seenWritten = Date.now(); await setState(pool, 'shop_seen_at', new Date().toISOString()); }
@@ -332,7 +335,7 @@ module.exports = function createSync({ pool, tx, wrap, HttpError, notify, MODE, 
     res.json({ changes: out.map((x) => x.ch), cursor, more });
   }));
   router.get('/snapshot', wrap(async (req, res) => {
-    cloudOnly(req);
+    await cloudOnly(req);
     const tbl = String(req.query.tbl || ''); const cols = PK[tbl];
     if (!cols) throw new HttpError(400, 'Unknown table');
     let last = null; try { last = req.query.after ? JSON.parse(req.query.after) : null; } catch { last = null; }
@@ -411,6 +414,7 @@ module.exports = function createSync({ pool, tx, wrap, HttpError, notify, MODE, 
       try {
         state.sending = true;
         if (MODE === 'local') {
+          await planCheck(); // shop first: this PC holds the licence
           if (!(await getState(pool, 'snapshot_done'))) await snapshot();
           busy = await drainOnce();
         } else {

@@ -18,7 +18,7 @@ const EVENTS = {
 };
 const MAX_ATTEMPTS = 25; // about 10 hours of retries, then "failed" (can be retried by hand)
 
-module.exports = function createIntegrations({ pool, tx, wrap, HttpError, CONFIG, MODE, shiftSummary }) {
+module.exports = function createIntegrations({ pool, tx, wrap, HttpError, CONFIG, MODE, shiftSummary, allowed }) {
   const bad = (msg) => { throw new HttpError(400, msg); };
   const KEYS = ['n8n_url', 'n8n_secret', 'n8n_events', 'n8n_email', 'n8n_variance_limit_cents'];
 
@@ -36,6 +36,7 @@ module.exports = function createIntegrations({ pool, tx, wrap, HttpError, CONFIG
   // Queue an event inside the caller's transaction. Does nothing on the cloud copy or when n8n isn't set up.
   async function emit(c, event, data, { force = false } = {}) {
     if (MODE === 'mirror' || MODE === 'standby') return null; // standby: the cloud sends it once the shift is uploaded
+    if (allowed && !(await allowed())) return null; // emails aren't in this restaurant's plan
     const cfg = await config(c);
     if (!cfg.url || (!force && !cfg.events.includes(event))) return null;
     const payload = {

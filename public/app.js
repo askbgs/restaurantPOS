@@ -102,6 +102,114 @@
     return '';
   }
 
+  // ---------- packages (Basic / Pro / Business) ----------
+  const LIC = () => S.cfg?.license || {};
+  const can = (f) => !LIC().features || LIC().features[f] !== false;
+  const FEAT = {
+    stock: ['Stock, recipes & suppliers', 'Pro', 'Track ingredients, recipe cost and food cost %, suppliers, deliveries and reorder lists. Stock comes off automatically when a bill is paid.'],
+    audit: ['Audit log', 'Pro', 'A permanent record of every void, refund, discount, reprint, cash movement and admin change, with who did it and who approved it.'],
+    emails: ['Email reports', 'Pro', 'The Z-report emailed to the owner when a shift closes, and an alert when the cash drawer is over or short.'],
+    fullReports: ['Full reports', 'Pro', 'Reports for any date range (30 days, months, a year) and CSV export for Excel.'],
+    offline: ['Shop PC backup', 'Business', 'A PC in the restaurant keeps working when the internet drops, and uploads everything when it is back.'],
+  };
+  const waLink = (text) => `https://wa.me/${S.cfg.vendorWhatsapp || ''}?text=${encodeURIComponent(text)}`;
+  const upgradeText = (plan) => `Hello, I'd like to ${plan ? `upgrade ${S.cfg.restaurant || 'our restaurant'} to the ${plan} plan` : `renew the POS licence for ${S.cfg.restaurant || 'our restaurant'}`}${LIC().client ? ` (licence: ${LIC().client})` : ''}.`;
+  const lockTag = (f) => (can(f) ? '' : `<span class="plan-tag" title="${esc(FEAT[f][1])} plan">${esc(FEAT[f][1])}</span>`);
+  function upgradeView(f, wrap = true) {
+    const [name, plan, text] = FEAT[f];
+    const card = `<div class="upgrade-card"><div class="eyebrow">${esc(plan)} plan</div><h2>${esc(name)}</h2><p>${esc(text)}</p>
+      <p class="muted">Your plan: <b>${esc(LIC().planName || '')}</b>. Upgrading keeps all your data.</p>
+      <a class="btn red" href="${esc(waLink(upgradeText(plan)))}" target="_blank" rel="noopener">Upgrade on WhatsApp</a>
+      ${isManager() ? '<button type="button" class="btn" data-act="go-plan">See plans</button>' : ''}</div>`;
+    return wrap ? `<section class="upgrade-wrap scroll">${card}</section>` : card;
+  }
+  function askUpgrade(f) {
+    const [name, plan] = FEAT[f];
+    S.modal = { kind: 'confirm', eyebrow: `${plan} plan`, title: name, text: `${FEAT[f][2]} This is part of the ${plan} plan. Your plan: ${LIC().planName}.`,
+      yes: 'Upgrade on WhatsApp', run: () => { window.open(waLink(upgradeText(plan)), '_blank', 'noopener'); S.modal = null; renderModal(); } };
+    renderModal();
+  }
+  // Reminder before expiry (managers), and the hard stop after the grace period (everyone)
+  function licenceBar() {
+    const L = LIC(); if (!L.state || !S.user) return '';
+    const mgr = isManager(); const trial = L.plan === 'trial';
+    const days = (n) => `${n} day${n === 1 ? '' : 's'}`;
+    const btn = (t) => `<a class="bar-btn" href="${esc(waLink(upgradeText(trial ? 'Pro' : null)))}" target="_blank" rel="noopener">${t}</a>`;
+    let cls = ''; let txt = '';
+    const choose = btn(trial ? 'Choose a plan' : 'Renew on WhatsApp');
+    let act = '';
+    if (L.problem && mgr) { cls = 'off'; txt = `<b>Licence key problem:</b> ${esc(L.problem)} Running as ${esc(L.planName)}.`; }
+    else if (L.state === 'expired') { cls = 'off'; txt = `<b>The ${trial ? 'free trial' : 'licence'} ended on ${esc(L.expires)}.</b> New orders can't be started. Open orders can still be finished and printed.${mgr ? '' : ' Please tell a manager.'}`; act = mgr ? choose : ''; }
+    else if (!mgr) return '';
+    else if (L.state === 'grace') { cls = 'off'; txt = `<b>The ${trial ? 'free trial' : `${esc(L.planName)} licence`} ended on ${esc(L.expires)}.</b> Everything keeps working until ${esc(L.graceEnds)}.`; act = choose; }
+    else if (L.state === 'warning') { cls = 'busy'; txt = `<b>${trial ? 'Free trial' : `${esc(L.planName)} plan`}: ${L.daysLeft === 0 ? 'last day today' : `${days(L.daysLeft)} left`}</b> (until ${esc(L.expires)}).`; act = choose; }
+    else if (trial) { txt = `<b>Free trial</b> with every feature included: ${days(L.daysLeft)} left.`; act = '<button type="button" class="bar-btn" data-act="go-plan">See plans</button>'; }
+    else return '';
+    return `<div class="standby-bar licence-bar ${cls}" role="status"><span>${txt}</span>${act}</div>`;
+  }
+  const deviceId = () => {
+    try {
+      let id = localStorage.getItem('posDevice');
+      if (!id) { id = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join(''); localStorage.setItem('posDevice', id); }
+      return id;
+    } catch { return ''; }
+  };
+  const deviceName = () => {
+    const u = navigator.userAgent;
+    const kind = /iPad/.test(u) || (/Macintosh/.test(u) && navigator.maxTouchPoints > 1) ? 'iPad' : /iPhone/.test(u) ? 'iPhone'
+      : /Android/.test(u) ? (/Mobile/.test(u) ? 'Android phone' : 'Android tablet') : /Windows/.test(u) ? 'Windows PC' : /Mac/.test(u) ? 'Mac' : /Linux/.test(u) ? 'Linux PC' : 'Device';
+    const br = /Edg\//.test(u) ? 'Edge' : /OPR\//.test(u) ? 'Opera' : /Chrome\//.test(u) ? 'Chrome' : /Firefox\//.test(u) ? 'Firefox' : /Safari\//.test(u) ? 'Safari' : '';
+    return `${kind}${br ? ` · ${br}` : ''}`;
+  };
+
+  // ---------- Admin → Plan & licence ----------
+  async function loadPlan() { S.admin.plan = await api('/admin/license'); }
+  function planView() {
+    const P = S.admin.plan; if (!P) return '<div class="empty">Loading…</div>';
+    const L = P.license; const lim = L.limits; const trial = L.plan === 'trial';
+    const stateChip = { active: ['ok', 'Active'], warning: ['busy', 'Ends soon'], grace: ['off', 'Ended · grace period'], expired: ['off', 'Ended'] }[L.state];
+    const meter = (used, max) => (max == null ? `<b>${used}</b> <span class="muted">· no limit</span>`
+      : `<b>${used} of ${max}</b><div class="meter ${used >= max ? 'full' : ''}"><i style="width:${Math.min(100, Math.round((used / max) * 100))}%"></i></div>`);
+    const plans = ['basic', 'pro', 'business'];
+    const rows = [['Devices signed in', (p) => (P.plans[p].devices == null ? 'No limit' : P.plans[p].devices)], ['Active staff', (p) => (P.plans[p].staff == null ? 'No limit' : P.plans[p].staff)],
+      ...Object.keys(P.features).map((f) => [P.features[f], (p) => (P.plans[p].features.includes(f) ? '✓' : '–')])];
+    const mine = deviceId();
+    return `<div class="page-head" style="border-bottom:0"><div><div class="eyebrow">Admin</div><h1 class="title">Plan &amp; licence</h1>
+        <div class="muted">Your package, what it includes, and the devices using this POS.</div></div>
+        <a class="btn red" href="${esc(waLink(upgradeText(L.plan === 'business' ? null : L.plan === 'pro' ? 'Business' : 'Pro')))}" target="_blank" rel="noopener">${L.plan === 'business' ? 'Renew on WhatsApp' : 'Upgrade on WhatsApp'}</a></div>
+      <div class="plan-grid">
+        <div class="plan-card"><div class="eyebrow">Your plan</div><div class="plan-name">${esc(L.planName)}</div>
+          <div><span class="state-chip ${stateChip[0]}">${stateChip[1]}</span></div>
+          ${L.client ? `<div class="kv"><span>Licensed to</span><b>${esc(L.client)}</b></div>` : ''}
+          <div class="kv"><span>${L.daysLeft >= 0 ? 'Valid until' : 'Ended on'}</span><b>${esc(L.expires)}</b></div>
+          <div class="kv"><span>${L.daysLeft >= 0 ? 'Days left' : 'Works until'}</span><b>${L.daysLeft >= 0 ? L.daysLeft : esc(L.graceEnds)}</b></div>
+          ${L.problem ? `<div class="note-red" style="margin-top:10px">${esc(L.problem)}</div>` : ''}
+        </div>
+        <div class="plan-card"><div class="eyebrow">Usage</div>
+          <div class="kv col"><span>Devices signed in (last 30 days)</span>${meter(P.usage.devices, lim.devices)}</div>
+          <div class="kv col"><span>Active staff</span>${meter(P.usage.staff, lim.staff)}</div>
+        </div>
+      </div>
+      <h3 class="plan-h">Compare plans</h3>
+      <div class="htable-wrap"><table class="htable plan-table"><thead><tr><th></th>${plans.map((p) => `<th class="${L.plan === p ? 'cur' : ''}">${esc(P.plans[p].name)}${L.plan === p ? ' · yours' : ''}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(([label, f]) => `<tr><td class="name">${esc(label)}</td>${plans.map((p) => `<td class="${L.plan === p ? 'cur' : ''}">${f(p)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
+      ${trial ? '<p class="muted" style="margin:8px 20px 0">The free trial includes everything, on up to 3 devices.</p>' : ''}
+      <h3 class="plan-h">Devices</h3>
+      <div class="htable-wrap"><table class="htable"><thead><tr><th>Device</th><th>Last used</th><th>By</th><th></th></tr></thead><tbody>
+        ${P.devices.length ? P.devices.map((d) => `<tr><td class="name">${esc(d.name || 'Device')}${d.id === mine ? ' <span class="plan-tag">this device</span>' : ''}${d.active ? '' : ' <span class="muted">· not counted</span>'}</td>
+          <td>${esc(ago(d.last_seen))}</td><td>${esc(d.last_staff_name || '')}</td>
+          <td style="text-align:right">${d.id === mine ? '' : `<button type="button" class="btn sm" data-act="device-remove" data-id="${esc(d.id)}">Remove</button>`}</td></tr>`).join('')
+          : '<tr><td colspan="4" class="muted">No devices yet.</td></tr>'}</tbody></table></div>
+      <p class="muted" style="margin:8px 20px 0">Removing a device signs it out. It can sign in again while the plan has room. Devices unused for 30 days stop counting by themselves.</p>
+      <h3 class="plan-h">Licence key</h3>
+      <div style="padding:0 20px 28px">
+        ${!P.hasPublicKey ? '<div class="note-red" style="margin-bottom:10px">This installation has no licence public key yet, so keys can\'t be checked. (Vendor: run the key generator and redeploy.)</div>' : ''}
+        ${P.keyFromEnv ? '<div class="muted">The licence key is set on the server (LICENSE_KEY). To change plan, the key is replaced there.</div>'
+          : `<form id="license-form"><textarea name="key" rows="3" placeholder="Paste the licence key you received on WhatsApp" spellcheck="false" autocomplete="off" required></textarea>
+            <button type="submit" class="btn dark" style="margin-top:8px">Save licence key</button></form>`}
+      </div>`;
+  }
+
   // Shop PC (standby): what staff should do right now
   function standbyBar() {
     if (S.cfg?.mode !== 'standby') return '';
@@ -211,7 +319,7 @@
     else if (k === 'ok') {
       if (pin.length < 4) return renderLogin('PIN is at least 4 digits');
       try {
-        S.user = await api('/login', { body: { pin } });
+        S.user = await api('/login', { body: { pin, device: deviceId(), deviceName: deviceName() } });
         pin = '';
         return boot();
       } catch (e) { pin = ''; return renderLogin(e.message); }
@@ -237,7 +345,7 @@
           ${S.cfg.mode === 'mirror' ? '' : tab('bill', 'Bill', o ? money(o.total_cents) : 'No order', !o)}
           ${tab('history', 'History', `${f.closed_today ?? 0} closed`)}
           ${tab('shift', 'Shift', S.shift?.shift ? `${shiftNo(S.shift.shift.id)} open` : 'Not open')}
-          ${isManager() ? tab('stock', 'Stock', f.stock_alerts ? `${f.stock_alerts} to reorder` : 'Ingredients') : ''}
+          ${isManager() ? tab('stock', 'Stock', !can('stock') ? 'Pro plan' : f.stock_alerts ? `${f.stock_alerts} to reorder` : 'Ingredients') : ''}
           ${isManager() ? tab('reports', 'Reports', 'Sales') : ''}
           ${isManager() ? tab('admin', 'Admin', 'Menu & staff') : ''}
         </nav>
@@ -583,7 +691,8 @@
   }
 
   // ---------- admin ----------
-  const ADMIN_SECTIONS = [['items', 'Menu items'], ['categories', 'Categories'], ['floor', 'Floor & tables'], ['stations', 'Stations'], ['staff', 'Staff'], ['printers', 'Printers'], ['integrations', 'Integrations'], ['audit', 'Audit log'], ['settings', 'Settings']];
+  const ADMIN_SECTIONS = [['items', 'Menu items'], ['categories', 'Categories'], ['floor', 'Floor & tables'], ['stations', 'Stations'], ['staff', 'Staff'], ['printers', 'Printers'], ['integrations', 'Integrations'], ['audit', 'Audit log'], ['settings', 'Settings'], ['plan', 'Plan & licence']];
+  const SECTION_FEATURE = { audit: 'audit', integrations: 'emails' };
   const ADMIN_PATH = { item: 'items', category: 'categories', area: 'areas', table: 'tables', station: 'stations', staff: 'staff' };
   const ADMIN_NOUN = { item: 'dish', category: 'category', area: 'area', table: 'table', station: 'station', staff: 'staff member' };
   const isManager = () => S.user?.role === 'Manager';
@@ -627,6 +736,9 @@
 
   function adminForm() {
     const A = S.admin; const D = A.data; const s = A.sel;
+    if (!s && A.section === 'plan') {
+      return `<div class="empty" style="padding:28px 20px"><b>Changing plan</b><br><br>Message us on WhatsApp to upgrade, renew or add devices. You'll get a new licence key: paste it under <b>Licence key</b> and it applies straight away on every device.<br><br>Nothing is deleted when a plan changes. Features you don't have keep their data until you upgrade again.</div>`;
+    }
     if (!s) return `<div class="empty" style="padding:28px 20px">Select a row to edit it, or add a new one.</div>`;
     const find = (list) => (s.id ? list.find((x) => x.id === s.id) : null);
     let rec, body;
@@ -741,6 +853,8 @@
             <td>${s.sort}</td><td><b>${esc(s.code)}</b></td><td class="name">${esc(s.name)}</td><td>${esc(s.printer)}</td><td>${s.item_count}</td></tr>`).join('')}</tbody></table></div>`;
     }
     if (A.section === 'printers') return printersList();
+    if (SECTION_FEATURE[A.section] && !can(SECTION_FEATURE[A.section])) return upgradeView(SECTION_FEATURE[A.section], false);
+    if (A.section === 'plan') return planView();
     if (A.section === 'audit') return auditList();
     if (A.section === 'integrations') return integrationsList();
     if (A.section === 'settings') {
@@ -852,7 +966,7 @@
     if (!S.admin.data) return '<section class="hist"><div class="empty">Loading…</div></section>';
     return `<section class="admin">
       <aside class="cats scroll"><div class="label">ADMIN</div>
-        ${ADMIN_SECTIONS.map(([id, label]) => `<button type="button" class="cat ${S.admin.section === id ? 'on' : ''}" data-act="admin-section" data-id="${id}">${label}</button>`).join('')}
+        ${ADMIN_SECTIONS.map(([id, label]) => `<button type="button" class="cat ${S.admin.section === id ? 'on' : ''}" data-act="admin-section" data-id="${id}">${esc(label)}${SECTION_FEATURE[id] ? lockTag(SECTION_FEATURE[id]) : ''}</button>`).join('')}
       </aside>
       <div class="scroll" id="admin-list">${adminList()}</div>
       <aside class="hdetail scroll admin-form">${S.admin.sel?.kind === 'printer' ? printerForm()
@@ -1068,9 +1182,11 @@
     const head = `<div class="page-head rep-head" style="border-bottom:0"><div><div class="eyebrow">Reports</div><h1 class="title">Sales</h1>
         <div class="muted">${d ? (d.from === d.to ? d.from : `${d.from} → ${d.to}`) : ''}</div></div>
       <div class="rep-controls no-print">
-        <div class="seg">${presets.map(([k, l]) => `<button type="button" class="${R.preset === k ? 'on' : ''}" data-act="rep-preset" data-v="${k}">${l}</button>`).join('')}</div>
+        <div class="seg">${presets.map(([k, l]) => (['30d', 'month', 'custom'].includes(k) && !can('fullReports')
+          ? `<button type="button" class="locked" data-act="upgrade" data-f="fullReports" title="Pro plan">${l} <span class="plan-tag">Pro</span></button>`
+          : `<button type="button" class="${R.preset === k ? 'on' : ''}" data-act="rep-preset" data-v="${k}">${l}</button>`)).join('')}</div>
         ${R.preset === 'custom' ? `<form id="rep-range" class="rep-range"><input type="date" name="from" value="${R.from}" required><span>→</span><input type="date" name="to" value="${R.to}" required><button class="btn dark" type="submit">Apply</button></form>` : ''}
-        <button type="button" class="btn" data-act="rep-csv">Export CSV</button><button type="button" class="btn" data-act="rep-print">Print / PDF</button>
+        ${can('fullReports') ? '<button type="button" class="btn" data-act="rep-csv">Export CSV</button>' : '<button type="button" class="btn locked" data-act="upgrade" data-f="fullReports">Export CSV <span class="plan-tag">Pro</span></button>'}<button type="button" class="btn" data-act="rep-print">Print / PDF</button>
       </div></div>`;
     if (!d) return `<section class="reports scroll">${head}<div class="empty">Loading…</div></section>`;
     const K = d.kpis;
@@ -1090,7 +1206,7 @@
         <div class="rep-card"><h3>Busy hours <small class="muted">by order start time</small></h3>${hours.length
           ? barChart(hours.map((h) => ({ v: h.cents, label: `${h.hour}:00–${h.hour + 1}:00`, tick: `${(h.hour % 12) || 12}${h.hour < 12 ? 'a' : 'p'}`, extra: `${h.orders} orders` })), { label: 'Sales by hour', height: 150 })
           : '<div class="muted">No sales in this period.</div>'}</div>
-        ${d.stock.has_recipes ? `<div class="rep-card"><h3>Food cost & stock <small class="muted">ingredients valued at average cost when used</small></h3>
+        ${d.stock.has_recipes && can('stock') ? `<div class="rep-card"><h3>Food cost & stock <small class="muted">ingredients valued at average cost when used</small></h3>
           <div class="kpis inner">
             ${kpi('Food & drink sales', money(d.stock.food_sales_cents), 'after discounts, before service & tax')}
             ${kpi('Cost of ingredients', money(d.stock.cogs_cents), 'from recipes of what was sold')}
@@ -1109,7 +1225,7 @@
           <div class="rep-card"><h3>Staff</h3>${meterTable(d.staff, [{ h: 'Name', f: (r) => `${esc(r.name)}<div class="muted" style="font-size:12px">${esc(r.role)}</div>`, meter: true }, { h: 'Orders', f: (r) => r.orders, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }, { h: 'Avg bill', f: (r) => money(r.avg_cents), right: true }, { h: 'Voids', f: (r) => r.voids, right: true }])}</div>
           <div class="rep-card"><h3>Tables</h3>${meterTable(d.tables, [{ h: 'Table', f: (r) => `${esc(r.code)} <span class="muted">${esc(r.area)}</span>`, meter: true }, { h: 'Turns', f: (r) => r.orders, right: true }, { h: 'Covers', f: (r) => r.covers, right: true }, { h: 'Avg time', f: (r) => `${r.avg_minutes} min`, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true }])}</div>
         </div>
-        ${d.stock.has_recipes ? `<div class="rep-grid">
+        ${d.stock.has_recipes && can('stock') ? `<div class="rep-grid">
           <div class="rep-card"><h3>Profit by dish <small class="muted">current recipe cost</small></h3>${meterTable(d.dish_profit.slice(0, 15), [
             { h: 'Dish', f: (r) => esc(r.name), meter: true }, { h: 'Qty', f: (r) => r.qty, right: true }, { h: 'Sales', f: (r) => money(r.cents), right: true },
             { h: 'Cost', f: (r) => (r.cost_cents === null ? '<span class="muted">no recipe</span>' : money(r.cost_cents)), right: true },
@@ -1499,6 +1615,7 @@
   }
   function stockView() {
     if (!isManager()) return '<section class="start"><h1 class="title">Managers only</h1></section>';
+    if (!can('stock')) return upgradeView('stock');
     return `<section class="admin">
       <aside class="cats scroll"><div class="label">STOCK</div>
         ${STOCK_SECTIONS.map(([id, label]) => `<button type="button" class="cat ${S.inv.section === id ? 'on' : ''}" data-act="inv-section" data-id="${id}">${label}${id === 'reorder' && S.floor?.stats?.stock_alerts ? `<small class="note-red">${S.floor.stats.stock_alerts}</small>` : ''}</button>`).join('')}
@@ -1633,7 +1750,7 @@
         <div class="modal-foot"><div class="grow"></div><button type="button" class="btn" data-act="close-modal">Back</button>
           <button type="submit" class="btn red"><span>${esc(m.submit)}</span></button></div></form>`;
     } else if (m.kind === 'confirm') {
-      html = `<div class="modal" style="width:min(460px,100%)"><div class="modal-head"><div><div class="eyebrow">Confirm</div><h2 style="font-size:24px">${esc(m.title)}</h2></div></div>
+      html = `<div class="modal" style="width:min(460px,100%)"><div class="modal-head"><div><div class="eyebrow">${esc(m.eyebrow || 'Confirm')}</div><h2 style="font-size:24px">${esc(m.title)}</h2></div></div>
         <div class="modal-body"><div class="msec" style="border-bottom:0">${esc(m.text)}</div></div>
         <div class="modal-foot"><div class="grow"></div><button type="button" class="btn" data-act="close-modal">Back</button>
           <button type="button" class="btn red" data-act="confirm-yes"><span>${esc(m.yes)}</span></button></div></div>`;
@@ -1767,7 +1884,7 @@
     const caret = active === 'search' ? document.activeElement.selectionStart : null;
     const scrolls = [...root.querySelectorAll('.scroll, .ticket-lines, .kcol-b')].map((e) => e.scrollTop);
     const mirrorBar = S.cfg.mode === 'mirror' ? `<div class="mirror-bar"><b>Cloud copy, read-only.</b> Orders, payments and changes are made on the POS in the shop and appear here automatically${S.sync?.last_ingest_at ? ` (last update ${ago(S.sync.last_ingest_at)})` : ''}.</div>` : '';
-    root.innerHTML = `<div class="app">${header()}${mirrorBar}${standbyBar()}<main>${view}</main></div>`;
+    root.innerHTML = `<div class="app">${header()}${mirrorBar}${standbyBar()}${licenceBar()}<main>${view}</main></div>`;
     [...root.querySelectorAll('.scroll, .ticket-lines, .kcol-b')].forEach((e, i) => { if (scrolls[i]) e.scrollTop = scrolls[i]; });
     if (active === 'search') { const s = $('#search'); s.focus(); if (caret !== null) s.setSelectionRange(caret, caret); }
     if ($('#rec-total')) updateRecipeTotal();
@@ -1810,7 +1927,7 @@
     if (tab === 'admin' && isManager()) await loadAdmin();
     if (tab === 'shift') await loadShift();
     if (tab === 'reports' && isManager()) await loadReport();
-    if (tab === 'stock' && isManager()) await loadInv();
+    if (tab === 'stock' && isManager() && can('stock')) await loadInv();
     if ((tab === 'order' || tab === 'bill') && S.order) await loadOrder();
     render();
   }
@@ -1943,9 +2060,17 @@
     'admin-section': async (d) => {
       resetImg(); S.admin.section = d.id; S.admin.sel = null;
       if (d.id === 'printers') await loadPrinting();
-      if (d.id === 'audit') await loadAudit();
-      if (d.id === 'integrations') await loadIntegrations();
+      if (d.id === 'audit' && can('audit')) await loadAudit();
+      if (d.id === 'integrations' && can('emails')) await loadIntegrations();
+      if (d.id === 'plan') await loadPlan();
       render();
+    },
+    'go-plan': async () => { S.modal = null; renderModal(); S.admin.section = 'plan'; S.admin.sel = null; await setTab('admin'); await loadPlan(); render(); },
+    upgrade: (d) => askUpgrade(d.f),
+    'device-remove': (d) => {
+      S.modal = { kind: 'confirm', title: 'Remove this device?', text: 'It is signed out now. It can sign in again later while your plan has room for another device.', yes: 'Remove device',
+        run: async () => { S.admin.plan = await api('/admin/devices/' + encodeURIComponent(d.id), { method: 'DELETE' }); S.modal = null; renderModal(); render(); toast('Device removed'); } };
+      renderModal();
     },
     'integ-test': async () => { await api('/admin/integrations/test', { body: {} }); toast('Test event queued'); await integRefreshSoon(); },
     'integ-resend': async () => { const r = await api('/admin/integrations/resend-last-shift', { body: {} }); toast(`Z-report for shift ${shiftNo(r.shift_id)} queued`); await integRefreshSoon(); },
@@ -2207,6 +2332,17 @@
       run(async () => {
         await api('/admin/printing/routing', { method: 'PATCH', body: { bill_printer_id: f.bill_printer_id || null, kitchen_printer_id: f.kitchen_printer_id || null, stations } });
         toast('Printer routing saved'); await loadPrinting(); render();
+      })();
+    }
+    if (e.target.id === 'license-form') {
+      e.preventDefault();
+      const key = new FormData(e.target).get('key');
+      (async () => {
+        try {
+          S.admin.plan = await api('/admin/license', { body: { key } });
+          S.cfg = await fetch('/api/config').then((x) => x.json());
+          toast(`Licence saved: ${S.admin.plan.license.planName} plan until ${S.admin.plan.license.expires}`); render();
+        } catch (err) { toast(err.message); }
       })();
     }
     if (e.target.id === 'rep-range') {

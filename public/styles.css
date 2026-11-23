@@ -651,3 +651,31 @@ svg.bars { width: 100%; height: 180px; display: block; overflow: visible; }
 #net-bar { position: fixed; z-index: 9999; left: 0; right: 0; top: 0; background: #b3220f; color: #fff; padding: 14px 20px; font-size: 16px;
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 18px; box-shadow: 0 4px 18px rgba(0,0,0,.25); }
 #net-bar .bar-btn { font-size: 17px; padding: 11px 18px; }
+
+/* packages: plan tags, upgrade cards, Plan & licence page */
+.plan-tag { display: inline-block; margin-left: 6px; padding: 1px 6px; font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; background: #f3e3a8; color: #5a4300; vertical-align: 1px; }
+.cat .plan-tag { float: right; margin-top: 2px; }
+.seg button.locked, .btn.locked { color: var(--muted); }
+.upgrade-wrap { display: grid; place-items: center; padding: 40px 20px; height: 100%; }
+.upgrade-card { max-width: 520px; border: 2px solid var(--ink); background: #fff; padding: 28px 28px 24px; margin: 24px 20px; }
+.upgrade-card h2 { font-size: 28px; margin: 6px 0 10px; letter-spacing: -.01em; }
+.upgrade-card p { margin: 0 0 12px; line-height: 1.45; }
+.upgrade-card .btn { margin: 6px 8px 0 0; display: inline-block; text-decoration: none; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; padding: 0 20px; }
+.plan-card { border: 2px solid var(--ink); background: #fff; padding: 18px 20px; }
+.plan-name { font-size: 34px; font-weight: 800; letter-spacing: -.02em; margin: 4px 0 8px; }
+.plan-card .kv { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid #e3e2df; margin-top: 8px; }
+.plan-card .kv.col { display: block; }
+.plan-card .kv.col > span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 4px; }
+.plan-card .kv > span { color: var(--muted); }
+.meter { height: 8px; background: #e7e6e3; margin-top: 6px; }
+.meter i { display: block; height: 100%; background: #1f6b38; }
+.meter.full i { background: #b3220f; }
+.state-chip { display: inline-block; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; padding: 3px 8px; background: #e7e6e3; }
+.state-chip.ok { background: #dcefe2; color: #1f6b38; } .state-chip.busy { background: #f6e7c1; color: #6b4a00; } .state-chip.off { background: #f8dcd5; color: #8a2a12; }
+.plan-h { margin: 26px 20px 8px; font-size: 18px; }
+.plan-table td, .plan-table th { text-align: center; }
+.plan-table td.name { text-align: left; }
+.plan-table .cur { background: #fbf6e3; font-weight: 700; }
+#license-form textarea { width: 100%; max-width: 720px; font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; padding: 10px; border: 2px solid var(--ink); }
+.btn.sm { padding: 6px 10px; font-size: 13px; }

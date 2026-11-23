@@ -1,7 +1,7 @@
 // Manager-only sales reports for a date range (inclusive), in the restaurant's time zone.
 const express = require('express');
 
-module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG }) {
+module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG, license }) {
   const r = express.Router();
   r.use((req, res, next) => (req.user.role === 'Manager' ? next() : next(new HttpError(403, 'Managers only'))));
 
@@ -15,6 +15,11 @@ module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG }) {
     if (from > to) throw new HttpError(400, 'Start date is after end date');
     const days = (new Date(to) - new Date(from)) / 86400000 + 1;
     if (days > 370) throw new HttpError(400, 'Pick a range of a year or less');
+    // Basic plan: the last 7 days only
+    if (license && !(await license.has('fullReports'))) {
+      const oldest = new Date(Date.parse(today) - 6 * 86400000).toISOString().slice(0, 10);
+      if (from < oldest) throw Object.assign(new HttpError(403, `Reports older than 7 days: available in the Pro plan. Contact us on WhatsApp to upgrade.`), { upgrade: 'fullReports' });
+    }
 
     // Paid orders belong to the day they were paid; voids and refunds to the day they happened.
     const P = [tz, from, to];

@@ -39,6 +39,14 @@ async function loadSettings() {
 }
 listeners.add((kind) => { if (kind === 'settings') loadSettings().catch((e) => console.error('settings reload', e.message)); });
 
+// Packages: Basic / Pro / Business, unlocked by a signed licence key (server/license.js)
+const license = require('./license')({ pool, CONFIG });
+const VENDOR_WHATSAPP = (process.env.VENDOR_WHATSAPP || '94786036092').replace(/\D/g, '');
+// Route guard: the feature must be in this restaurant's plan
+const need = (feature) => (req, res, next) => license.has(feature)
+  .then((ok) => (ok ? next() : next(Object.assign(new HttpError(403, license.upgradeMessage(feature)), { upgrade: feature }))), next);
+const DEVICE_ACTIVE_DAYS = 30; // a device unused this long no longer counts towards the limit
+
 const app = express();
 app.set('trust proxy', 1);
 // ---------- deployment mode ----------
@@ -170,10 +178,11 @@ async function openShift(c) {
 }
 
 const printing = createPrinting({ pool, tx, listeners, CONFIG, wrap, HttpError });
-const integrations = createIntegrations({ pool, tx, wrap, HttpError, CONFIG, MODE, shiftSummary: (c, id) => shiftSummary(c, id) });
+const integrations = createIntegrations({ pool, tx, wrap, HttpError, CONFIG, MODE, shiftSummary: (c, id) => shiftSummary(c, id), allowed: () => license.has('emails') });
 const inventory = createInventory({ pool, tx, wrap, HttpError, audit, notify });
 app.use('/bridge', printing.bridge);
 const sync = require('./sync')({ pool, tx, wrap, HttpError, notify, MODE, CLOUD_URL, SYNC_TOKEN,
+  allowed: async () => (await license.has('offline')) || license.upgradeMessage('offline'),
   // a shift closed on the shop PC during an outage: the cloud sends its Z-report email once it arrives
   onRemoteShiftClosed: async (c, id) => { await integrations.shiftClosed(c, await shiftSummary(c, id)); setTimeout(() => integrations.kick(), 500); } });
 app.use('/sync', sync.ingest);
@@ -191,7 +200,8 @@ app.get('/api/config', wrap(async (req, res) => {
   const { rows } = await pool.query("SELECT key, extract(epoch FROM updated_at)::bigint AS v FROM app_images WHERE key IN ('login_bg','logo')");
   const ver = Object.fromEntries(rows.map((r) => [r.key, r.v]));
   const { logoRaster, ...pub } = CONFIG;
-  res.json({ ...pub, mode: MODE, printDirect: PRINT_DIRECT, billText: billtext.TEXT, cloudUrl: MODE === 'standby' ? CLOUD_URL : undefined,
+  const lic = await license.current();
+  res.json({ ...pub, license: { ...lic, id: undefined }, vendorWhatsapp: VENDOR_WHATSAPP, mode: MODE, printDirect: PRINT_DIRECT, billText: billtext.TEXT, cloudUrl: MODE === 'standby' ? CLOUD_URL : undefined,
     loginBg: ver.login_bg ? `/login-bg?v=${ver.login_bg}` : '/img/login-bg.jpg', logo: ver.logo ? `/logo?v=${ver.logo}` : null });
 }));
 
@@ -228,22 +238,61 @@ app.post('/api/login', wrap(async (req, res) => {
     await audit(pool, { action: 'login.failed', summary: 'Wrong PIN entered', details: { ip: req.ip } });
     throw new HttpError(401, 'Wrong PIN');
   }
+  const deviceId = await claimDevice(req, user);
   await audit(pool, { action: 'login', staffId: user.id, summary: `${user.name} signed in` });
   const token = crypto.randomBytes(24).toString('hex');
-  await pool.query('INSERT INTO sessions(token, staff_id) VALUES ($1,$2)', [token, user.id]);
+  await pool.query('INSERT INTO sessions(token, staff_id, device_id) VALUES ($1,$2,$3)', [token, user.id, deviceId]);
   res.setHeader('Set-Cookie', `pos_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 16}${req.secure ? '; Secure' : ''}`);
   res.json({ id: user.id, name: user.name, initials: user.initials, role: user.role });
 }));
+
+// Device limit. Each browser sends its own device id (kept in its localStorage) when signing in.
+// A device that is already registered always gets in. A new one gets in while the plan has room;
+// when it's full, a Manager signing in on the new device replaces the device unused the longest,
+// and other staff are asked to fetch a manager.
+async function claimDevice(req, user) {
+  const raw = String(req.body.device || '');
+  const id = /^[A-Za-z0-9_-]{8,64}$/.test(raw) ? raw
+    : `legacy-${crypto.createHash('sha256').update(`${req.ip}|${req.headers['user-agent'] || ''}`).digest('hex').slice(0, 16)}`;
+  const name = String(req.body.deviceName || '').replace(/[\u0000-\u001f]/g, '').slice(0, 60);
+  const { limits, planName } = await license.current();
+  return tx(async (c) => {
+    await c.query('SELECT pg_advisory_xact_lock(4711)'); // two tablets signing in at once can't both take the last place
+    const { rows: [known] } = await c.query('SELECT id, revoked_at FROM devices WHERE id=$1', [id]);
+    if (!known || known.revoked_at) {
+      if (limits.devices != null) {
+        const { rows: active } = await c.query(`SELECT id FROM devices WHERE revoked_at IS NULL AND last_seen > now() - interval '${DEVICE_ACTIVE_DAYS} days'
+                                                ORDER BY last_seen ASC`);
+        if (active.length >= limits.devices) {
+          if (user.role !== 'Manager') {
+            throw new HttpError(403, `This POS is already in use on ${active.length} device${active.length === 1 ? '' : 's'}, the most the ${planName} plan allows. Ask a manager to sign in on this device, or to remove an old device in Admin → Plan & licence.`);
+          }
+          const drop = active.slice(0, active.length - limits.devices + 1).map((d) => d.id);
+          await c.query('UPDATE devices SET revoked_at=now() WHERE id = ANY($1)', [drop]);
+          await c.query('DELETE FROM sessions WHERE device_id = ANY($1)', [drop]);
+          await audit(c, { action: 'device.replaced', staffId: user.id, summary: `${user.name} signed in on a new device; the device unused the longest was removed (plan limit ${limits.devices})` });
+        }
+      }
+      await c.query(`INSERT INTO devices(id, name, last_staff) VALUES ($1,$2,$3)
+                     ON CONFLICT (id) DO UPDATE SET revoked_at=NULL, first_seen=now(), last_seen=now(), name=EXCLUDED.name, last_staff=EXCLUDED.last_staff`, [id, name, user.id]);
+    } else {
+      await c.query('UPDATE devices SET last_seen=now(), last_staff=$2, name=CASE WHEN $3 <> \'\' THEN $3 ELSE name END WHERE id=$1', [id, user.id, name]);
+    }
+    return id;
+  });
+}
 
 async function auth(req, res, next) {
   try {
     const token = parseCookies(req.headers.cookie).pos_session;
     if (!token) throw new HttpError(401, 'Not signed in');
     const { rows: [u] } = await pool.query(
-      `SELECT s.id, s.name, s.initials, s.role FROM sessions x JOIN staff s ON s.id=x.staff_id
+      `SELECT s.id, s.name, s.initials, s.role, x.device_id FROM sessions x JOIN staff s ON s.id=x.staff_id
        WHERE x.token=$1 AND s.active AND x.created_at > now() - interval '16 hours'`, [token]);
     if (!u) throw new HttpError(401, 'Session expired');
     req.user = u; req.token = token;
+    // keep the device counted as in use (at most one write every 10 minutes per device)
+    if (u.device_id) pool.query("UPDATE devices SET last_seen=now() WHERE id=$1 AND last_seen < now() - interval '10 minutes'", [u.device_id]).catch(() => {});
     next();
   } catch (e) { next(e); }
 }
@@ -251,11 +300,49 @@ app.use('/api', auth);
 
 app.get('/api/me', (req, res) => res.json(req.user));
 app.get('/api/sync/status', wrap(async (req, res) => res.json(await sync.status())));
-app.use('/api/admin', adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError, CONFIG, ENV_CONFIG, loadSettings, audit }));
+app.use('/api/admin/audit', need('audit'));
+app.use('/api/admin', adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError, CONFIG, ENV_CONFIG, loadSettings, audit, license }));
 app.use('/api/admin/printing', printing.admin);
-app.use('/api/admin/integrations', integrations.admin);
-app.use('/api/reports', reportsRouter({ pool, wrap, HttpError, CONFIG }));
-app.use('/api/inventory', inventory.router);
+app.use('/api/admin/integrations', need('emails'), integrations.admin);
+app.use('/api/reports', reportsRouter({ pool, wrap, HttpError, CONFIG, license }));
+app.use('/api/inventory', need('stock'), inventory.router);
+
+// ---------- Admin → Plan & licence (managers) ----------
+const managersOnly = (req) => { if (req.user.role !== 'Manager') throw new HttpError(403, 'Managers only'); };
+async function licenseInfo() {
+  const lic = await license.current();
+  const { rows: devices } = await pool.query(`SELECT d.id, d.name, d.first_seen, d.last_seen, s.name AS last_staff_name,
+      d.last_seen > now() - interval '${DEVICE_ACTIVE_DAYS} days' AS active
+    FROM devices d LEFT JOIN staff s ON s.id = d.last_staff WHERE d.revoked_at IS NULL ORDER BY d.last_seen DESC`);
+  const { rows: [st] } = await pool.query('SELECT count(*)::int AS n FROM staff WHERE active');
+  return { license: lic, plans: license.PLANS, features: license.FEATURES, vendorWhatsapp: VENDOR_WHATSAPP, hasPublicKey: license.hasPublicKey(),
+    keyFromEnv: !!process.env.LICENSE_KEY, devices, usage: { devices: devices.filter((d) => d.active).length, staff: st.n } };
+}
+app.get('/api/admin/license', wrap(async (req, res) => { managersOnly(req); res.json(await licenseInfo()); }));
+app.post('/api/admin/license', wrap(async (req, res) => {
+  managersOnly(req);
+  if (process.env.LICENSE_KEY) throw new HttpError(409, 'The licence key is set on the server (LICENSE_KEY). Change it there.');
+  let p; try { p = license.verifyKey(req.body.key); } catch (e) { throw new HttpError(400, e.message); }
+  await tx(async (c) => {
+    await c.query("INSERT INTO settings(key, value) VALUES ('license_key', $1) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", [String(req.body.key).trim().replace(/\s+/g, '')]);
+    await audit(c, { action: 'license.set', staffId: req.user.id, summary: `Licence key entered: ${license.PLANS[p.plan].name} plan for ${p.client}, until ${p.expires}` });
+  });
+  license.forget(); notify('settings');
+  res.json(await licenseInfo());
+}));
+app.delete('/api/admin/devices/:id', wrap(async (req, res) => {
+  managersOnly(req);
+  const id = String(req.params.id);
+  const { rows: [me] } = await pool.query('SELECT device_id FROM sessions WHERE token=$1', [req.token]);
+  if (me && me.device_id === id) throw new HttpError(400, 'This is the device you are using. Remove it from another device.');
+  await tx(async (c) => {
+    const { rowCount } = await c.query('UPDATE devices SET revoked_at=now() WHERE id=$1 AND revoked_at IS NULL', [id]);
+    if (!rowCount) throw new HttpError(404, 'Device not found');
+    await c.query('DELETE FROM sessions WHERE device_id=$1', [id]);
+    await audit(c, { action: 'device.removed', staffId: req.user.id, summary: `${req.user.name} removed a device from the POS` });
+  });
+  res.json(await licenseInfo());
+}));
 app.post('/api/logout', wrap(async (req, res) => {
   await pool.query('DELETE FROM sessions WHERE token=$1', [req.token]);
   res.setHeader('Set-Cookie', 'pos_session=; Path=/; Max-Age=0');
@@ -314,6 +401,10 @@ app.get('/api/floor', wrap(async (req, res) => {
 
 // ---------- orders ----------
 app.post('/api/orders', wrap(async (req, res) => {
+  const lic = await license.current();
+  if (lic.state === 'expired') {
+    throw new HttpError(403, `The ${lic.planName === 'Free trial' ? 'free trial' : 'licence'} ended on ${lic.expires}. Open orders can still be finished and printed. Contact us on WhatsApp to ${lic.plan === 'trial' ? 'choose a plan' : 'renew'}.`);
+  }
   const { type } = req.body;
   if (!['dinein', 'takeaway', 'delivery', 'counter'].includes(type)) bad('Unknown order type');
   if (!(await openShift(pool))) throw new HttpError(409, 'No shift is open. Open a shift before starting orders.');
@@ -883,13 +974,15 @@ app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(__dirname, '..', 
 app.use((err, req, res, next) => {
   const status = err.status || 500;
   if (status >= 500) console.error(err);
-  res.status(status).json({ error: status >= 500 ? 'Server error' : err.message });
+  res.status(status).json({ error: status >= 500 ? 'Server error' : err.message, ...(err.upgrade ? { upgrade: err.upgrade } : {}) });
 });
 
 const PORT = process.env.PORT || 3000;
 (async () => {
   await migrate({ seed: !['mirror', 'standby'].includes(MODE) }); // these get their data from the other server
   await sync.setup();
+  if (!['mirror', 'standby'].includes(MODE)) await license.ensureTrialStart(); // these take it from the other server
+  await license.adoptEnvKey();
   await sync.repairSequences();
   await loadSettings();
   await startListener();

@@ -1,7 +1,7 @@
 // Manager-only admin API: menu, categories, floor (areas + tables), stations, staff.
 const express = require('express');
 
-module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError, CONFIG, ENV_CONFIG, loadSettings, audit }) {
+module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError, CONFIG, ENV_CONFIG, loadSettings, audit, license }) {
   const { loadMenu } = require('./menu-data');
   const r = express.Router();
   const bad = (msg) => { throw new HttpError(400, msg); };
@@ -366,8 +366,18 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     if (pin && !/^\d{4,8}$/.test(pin)) bad('PIN must be 4–8 digits');
     return { name, initials, role, pin, active: b.active !== false };
   };
+  // the plan's staff limit counts active staff; it only stops adding or re-activating someone
+  async function staffRoom(exceptId = 0) {
+    const { limits, planName } = await license.current();
+    if (limits.staff == null) return;
+    const { rows: [n] } = await pool.query('SELECT count(*)::int AS n FROM staff WHERE active AND id <> $1', [exceptId]);
+    if (n.n >= limits.staff) {
+      throw Object.assign(new HttpError(403, `The ${planName} plan allows ${limits.staff} active staff, and you have ${n.n}. Turn off sign-in for someone who has left, or contact us on WhatsApp to upgrade.`), { upgrade: 'staff' });
+    }
+  }
   r.post('/staff', wrap(async (req, res) => {
     const s = staffBody(req.body);
+    if (s.active) await staffRoom();
     if (!s.pin) bad('Set a PIN');
     if (await pinTaken(s.pin)) bad('Another staff member already uses that PIN');
     await pool.query('INSERT INTO staff(name, initials, role, pin_hash, active) VALUES ($1,$2,$3,$4,$5)', [s.name, s.initials, s.role, hashPin(s.pin), s.active]);
@@ -379,6 +389,7 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     if ((s.role !== 'Manager' || !s.active) && (await managersLeft(id)) === 0) bad('Keep at least one active manager');
     if (id === req.user.id && !s.active) bad('You cannot deactivate yourself');
     if (s.pin && (await pinTaken(s.pin, id))) bad('Another staff member already uses that PIN');
+    if (s.active) { const { rows: [was] } = await pool.query('SELECT active FROM staff WHERE id=$1', [id]); if (was && !was.active) await staffRoom(id); }
     await tx(async (c) => {
       await c.query('UPDATE staff SET name=$2, initials=$3, role=$4, active=$5 WHERE id=$1', [id, s.name, s.initials, s.role, s.active]);
       if (s.pin) await c.query('UPDATE staff SET pin_hash=$2 WHERE id=$1', [id, hashPin(s.pin)]);

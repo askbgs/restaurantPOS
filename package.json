@@ -5,7 +5,9 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "node --watch server/index.js"
+    "dev": "node --watch server/index.js",
+    "license:keygen": "node tools/license/keygen.js",
+    "license:issue": "node tools/license/issue.js"
   },
   "license": "UNLICENSED",
   "dependencies": {
