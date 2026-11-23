@@ -53,7 +53,7 @@ if (body.event === 'shift.closed') {
   const avg = s.orders ? Math.round(s.gross_cents / s.orders) : 0;
   const varLabel = c.variance_cents === 0 ? 'Balanced' : c.variance_cents > 0 ? `Over ${money(c.variance_cents)}` : `Short ${money(-c.variance_cents)}`;
   subject = `Z-report · ${src.restaurant || 'POS'} · ${day(d.shift.closed_at)} · ${money(s.net_cents)}${c.variance_cents ? ` · cash ${c.variance_cents > 0 ? 'over' : 'short'}` : ''}`;
-  html = wrap(`Z-report · Shift #${d.shift.id}`, esc(src.restaurant || 'Daily report'),
+  html = wrap(`Z-report · Shift ${d.shift.label || `#${d.shift.id}`}`, esc(src.restaurant || 'Daily report'),
     `${when(d.shift.opened_at)} → ${when(d.shift.closed_at)} · opened by ${esc(d.shift.opened_by)}, closed by ${esc(d.shift.closed_by)}`,
     `<table width="100%" cellpadding="0" cellspacing="6" style="margin-top:18px;border-collapse:separate"><tr>${kpi('Net sales', money(s.net_cents))}${kpi('Orders', s.orders || 0)}${kpi('Covers', s.covers || 0)}${kpi('Avg order', money(avg))}</tr></table>`
     + (c.variance_cents ? `<div style="margin-top:14px;padding:12px 14px;background:#fdecea;border-left:4px solid ${RED};color:${RED};font-weight:700">Cash ${c.variance_cents > 0 ? 'over' : 'short'} by ${money(Math.abs(c.variance_cents))}</div>` : '')
@@ -68,17 +68,17 @@ if (body.event === 'shift.closed') {
     + section('Voids &amp; refunds', row('Voided items', `${v.items || 0} · ${money(v.amount_cents)}`) + row('Voided orders', v.orders || 0) + row('Refunds', `${rf.count || 0} · ${money(rf.total_cents)}`))
     + ((d.top_items || []).length ? section('Top dishes', d.top_items.map((t, i) => row(`${i + 1}. ${esc(t.name)} <span style="color:${MUTED}">× ${t.qty}</span>`, money(t.sales_cents))).join('')) : '')
     + (d.shift.note ? section('Closing note', `<tr><td style="padding:8px 0">${esc(d.shift.note)}</td></tr>`) : ''));
-  text = `Z-report, shift #${d.shift.id} (${when(d.shift.opened_at)} to ${when(d.shift.closed_at)})\nNet sales ${money(s.net_cents)} · ${s.orders} orders\nCash ${money(p.cash_cents)} · Card ${money(p.card_cents)} · Wallet ${money(p.wallet_cents)}\nCash expected ${money(c.expected_cents)}, counted ${money(c.counted_cents)}: ${varLabel}`;
+  text = `Z-report, shift ${d.shift.label || `#${d.shift.id}`} (${when(d.shift.opened_at)} to ${when(d.shift.closed_at)})\nNet sales ${money(s.net_cents)} · ${s.orders} orders\nCash ${money(p.cash_cents)} · Card ${money(p.card_cents)} · Wallet ${money(p.wallet_cents)}\nCash expected ${money(c.expected_cents)}, counted ${money(c.counted_cents)}: ${varLabel}`;
 } else if (body.event === 'cash.variance') {
   const short = d.variance_cents < 0;
-  subject = `Cash ${short ? 'SHORT' : 'over'} ${money(Math.abs(d.variance_cents))} · ${src.restaurant || 'POS'} · shift #${d.shift.id}`;
+  subject = `Cash ${short ? 'SHORT' : 'over'} ${money(Math.abs(d.variance_cents))} · ${src.restaurant || 'POS'} · shift ${d.shift.label || `#${d.shift.id}`}`;
   html = wrap('Cash count alert', `Cash ${short ? 'short' : 'over'} by ${money(Math.abs(d.variance_cents))}`,
-    `Shift #${d.shift.id} · closed ${when(d.shift.closed_at)} by ${esc(d.shift.closed_by)}`,
+    `Shift ${d.shift.label || `#${d.shift.id}`} · closed ${when(d.shift.closed_at)} by ${esc(d.shift.closed_by)}`,
     `<div style="margin-top:18px;padding:12px 14px;background:#fdecea;border-left:4px solid ${RED};color:${RED};font-weight:700">The counted cash ${short ? 'is less than' : 'is more than'} the system expected.</div>`
     + section('Drawer', row('Expected', money(d.expected_cents)) + row('Counted', money(d.counted_cents)) + row('<b>Difference</b>', signed(d.variance_cents), { bold: true, red: true })
       + row('Alert limit', money(d.limit_cents), { muted: true }))
     + (d.shift.note ? section('Closing note', `<tr><td style="padding:8px 0">${esc(d.shift.note)}</td></tr>`) : ''));
-  text = `Cash ${short ? 'short' : 'over'} by ${money(Math.abs(d.variance_cents))} on shift #${d.shift.id}. Expected ${money(d.expected_cents)}, counted ${money(d.counted_cents)}. Closed by ${d.shift.closed_by}.`;
+  text = `Cash ${short ? 'short' : 'over'} by ${money(Math.abs(d.variance_cents))} on shift ${d.shift.label || `#${d.shift.id}`}. Expected ${money(d.expected_cents)}, counted ${money(d.counted_cents)}. Closed by ${d.shift.closed_by}.`;
 } else if (body.event === 'test') {
   subject = `Test from ${src.restaurant || 'Restaurant POS'}`;
   html = wrap('Connection test', 'It works', `Sent by ${esc(d.sent_by)} · ${when(body.created_at)}`,

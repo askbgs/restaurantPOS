@@ -175,7 +175,7 @@ module.exports = function createPrinting({ pool, tx, listeners, CONFIG, wrap, Ht
       { t: 'text', s: CONFIG.restaurant, align: 'center', bold: true, size: 2 },
       { t: 'text', s: s.shift.status === 'closed' ? 'Z REPORT · SHIFT CLOSE' : 'X REPORT · SHIFT SO FAR', align: 'center', bold: true },
       { t: 'hr' },
-      { t: 'row', l: 'Shift', r: `#${s.shift.id}` },
+      { t: 'row', l: 'Shift', r: s.shift.id > 1000000000 ? `Offline #${s.shift.id - 1000000000}` : `#${s.shift.id}` },
       { t: 'row', l: 'Opened', r: `${when(s.shift.opened_at)}` },
       { t: 'row', l: 'Opened by', r: s.shift.opened_by_name || '' },
     ];

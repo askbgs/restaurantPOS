@@ -50,12 +50,16 @@
   }
 
   async function api(path, opts = {}) {
-    const res = await fetch('/api' + path, {
-      method: opts.method || (opts.body ? 'POST' : 'GET'),
-      headers: opts.body ? { 'Content-Type': 'application/json' } : {},
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-      credentials: 'same-origin',
-    });
+    let res;
+    try {
+      res = await fetch('/api' + path, {
+        method: opts.method || (opts.body ? 'POST' : 'GET'),
+        headers: opts.body ? { 'Content-Type': 'application/json' } : {},
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+        credentials: 'same-origin',
+      });
+    } catch { netState(false); throw new Error('No connection. Check the internet.'); }
+    netState(true);
     const data = await res.json().catch(() => ({}));
     if (res.status === 401 && path !== '/login') { S.user = null; renderLogin(); throw new Error('Signed out'); }
     if (!res.ok) throw new Error(data.error || 'Request failed');
@@ -68,6 +72,8 @@
     [S.floor, S.shift] = await Promise.all([api('/floor'), api('/shift'), loadSync()]);
   }
   async function loadSync() { if (S.cfg?.mode && S.cfg.mode !== 'standalone') S.sync = await api('/sync/status').catch(() => S.sync); }
+  // shifts opened on the shop PC during an outage have ids from 1,000,000,001: show them as "offline #1"
+  const shiftNo = (id) => (id > 1000000000 ? `offline #${id - 1000000000}` : `#${id}`);
   const ago = (t) => {
     if (!t) return 'never';
     const s0 = Math.max(0, Math.round((Date.now() - new Date(t)) / 1000));
@@ -83,8 +89,61 @@
       return `<span class="sync-pill ok" title="Cloud copy updated ${ago(y.last_ok_at)}">${y.pending ? `Syncing ${y.pending}…` : 'Cloud synced'}</span>`;
     }
     if (y.mode === 'mirror') return `<span class="sync-pill" title="Cloud copy. Changes from the shop arrive automatically.">Updated ${ago(y.last_ingest_at)}</span>`;
+    if (y.mode === 'standby') {
+      if (!y.configured) return '<span class="sync-pill" title="No cloud address set">Shop PC</span>';
+      if (!y.ready) return '<span class="sync-pill busy">Downloading…</span>';
+      if (y.online === false) return `<span class="sync-pill off" title="No internet. Keep working; changes upload when it's back.">Offline${y.pending ? ` · ${y.pending} to upload` : ''}</span>`;
+      return `<span class="sync-pill ${y.pending ? 'busy' : 'ok'}">${y.pending ? `Uploading ${y.pending}…` : 'Up to date'}</span>`;
+    }
+    if (y.mode === 'cloud') {
+      const fresh = y.shop_seen_at && Date.now() - new Date(y.shop_seen_at) < 120000;
+      return `<span class="sync-pill ${fresh ? 'ok' : ''}" title="The shop PC keeps a copy of this POS for when the internet drops.">${y.shop_seen_at ? `Shop PC ${fresh ? 'in sync' : `seen ${ago(y.shop_seen_at)}`}` : 'Shop PC not connected'}</span>`;
+    }
     return '';
   }
+
+  // Shop PC (standby): what staff should do right now
+  function standbyBar() {
+    if (S.cfg?.mode !== 'standby') return '';
+    const y = S.sync || {}; const n = y.pending || 0; const ch = `${n} change${n === 1 ? '' : 's'}`;
+    let cls = ''; let txt;
+    if (!y.configured) txt = '<b>Shop PC.</b> No cloud address is set (CLOUD_URL, SYNC_TOKEN).';
+    else if (!y.ready) { cls = 'busy'; txt = `<b>The shop PC is getting ready.</b> ${esc(y.snapshot || 'Downloading from the cloud…')} Don't take orders here until it finishes.`; }
+    else if (y.online === false) { cls = 'off'; txt = `<b>Offline mode: you're on the shop PC.</b> Keep working as normal. ${n ? `${ch} will upload` : 'Everything you do uploads'} to the cloud when the internet is back.`; }
+    else if (y.online && y.last_error) { cls = 'off'; txt = `<b>Upload problem.</b> ${esc(y.last_error)}`; }
+    else if (y.online && n) { cls = 'busy'; txt = `<b>Internet is back.</b> Uploading ${ch} to the cloud…`; }
+    else if (y.online && y.current) { cls = 'ok'; txt = '<b>Internet is back and everything is uploaded.</b> <a class="bar-btn" href="/start">Switch to the cloud POS</a>'; }
+    else txt = '<b>Shop PC.</b> Checking the cloud…';
+    return `<div id="standby-bar" class="standby-bar ${cls}" role="status">${txt}</div>`;
+  }
+
+  // Cloud POS: when the connection drops, offer the shop PC (its /start address is remembered from the last visit)
+  let netTimer = null;
+  function netState(ok) {
+    if (S.cfg?.mode !== 'cloud') return;
+    if (ok) { clearTimeout(netTimer); netTimer = null; $('#net-bar')?.remove(); return; }
+    if (netTimer || $('#net-bar')) return;
+    netTimer = setTimeout(() => { netTimer = null; showNetBar(); }, 5000);
+  }
+  function showNetBar() {
+    let shop = null; try { shop = localStorage.getItem('posShopUrl'); } catch { /* private mode */ }
+    const el = document.createElement('div'); el.id = 'net-bar'; el.setAttribute('role', 'alert');
+    el.innerHTML = `<div><b>No connection to the cloud POS.</b> ${shop ? 'Carry on with the POS on the shop PC. Everything uploads to the cloud when the internet is back.'
+      : 'Open the POS on the shop PC (its address ends in <b>:3000/start</b>) and carry on there.'}</div>${shop ? `<a class="bar-btn" href="${esc(shop)}">Switch to the shop PC</a>` : ''}`;
+    document.body.appendChild(el);
+  }
+  (() => {
+    const shop = new URLSearchParams(location.search).get('shop');
+    if (shop && /^https?:\/\/[^\s"'<>]+$/.test(shop)) { try { localStorage.setItem('posShopUrl', shop); } catch { /* ignore */ } }
+    if (shop) history.replaceState(null, '', location.pathname);
+  })();
+  async function checkCloud() {
+    if (S.cfg?.mode !== 'cloud') return;
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 4000);
+    try { const r = await fetch('/healthz', { cache: 'no-store', signal: ctl.signal }); netState(r.ok); } catch { netState(false); } finally { clearTimeout(t); }
+  }
+  setInterval(checkCloud, 4000);
+  window.addEventListener('offline', () => netState(false));
   async function loadOrder(id) { S.order = await api('/orders/' + (id || S.order.id)); if (S.order.payment_method) S.payMethod = S.order.payment_method; }
   async function loadKitchen() { S.kitchen = await api('/kitchen'); S.kitchen.fetchedAt = Date.now(); }
   async function loadHistory() {
@@ -110,13 +169,13 @@
 
   function connectEvents() {
     const es = new EventSource('/api/events');
-    es.onopen = () => { S.live = true; updateLiveDot(); };
+    es.onopen = () => { S.live = true; updateLiveDot(); netState(true); };
     es.onmessage = (e) => {
       if (e.data === 'menu' || e.data === 'stock') api('/menu').then((m) => { S.menu = m; if (S.tab === 'order' && $('#dish-area')) $('#dish-area').innerHTML = dishAreaHtml(); }).catch(() => {});
       if (e.data === 'settings') fetch('/api/config').then((x) => x.json()).then((c) => { S.cfg = c; document.title = `${c.restaurant} · POS`; scheduleRefresh(); }).catch(() => {});
       scheduleRefresh();
     };
-    es.onerror = () => { S.live = false; updateLiveDot(); };
+    es.onerror = () => { S.live = false; updateLiveDot(); netState(false); };
   }
   function updateLiveDot() { const d = $('.live-dot'); if (d) d.classList.toggle('off', !S.live); }
 
@@ -177,7 +236,7 @@
           ${tab('kitchen', 'Kitchen', `${f.live_tickets ?? 0} live tickets`)}
           ${S.cfg.mode === 'mirror' ? '' : tab('bill', 'Bill', o ? money(o.total_cents) : 'No order', !o)}
           ${tab('history', 'History', `${f.closed_today ?? 0} closed`)}
-          ${tab('shift', 'Shift', S.shift?.shift ? `#${S.shift.shift.id} open` : 'Not open')}
+          ${tab('shift', 'Shift', S.shift?.shift ? `${shiftNo(S.shift.shift.id)} open` : 'Not open')}
           ${isManager() ? tab('stock', 'Stock', f.stock_alerts ? `${f.stock_alerts} to reorder` : 'Ingredients') : ''}
           ${isManager() ? tab('reports', 'Reports', 'Sales') : ''}
           ${isManager() ? tab('admin', 'Admin', 'Menu & staff') : ''}
@@ -759,6 +818,17 @@
           + (y.last_error && y.online === false ? row('Last problem', `<span class="muted">${esc(y.last_error)}</span>`) : '');
     } else if (mode === 'mirror') {
       body = row('This server', 'Cloud copy (read-only)') + row('Last update from the shop', ago(y?.last_ingest_at));
+    } else if (mode === 'cloud') {
+      body = row('This server', 'Main POS (cloud)') + row('Shop PC copy', y?.shop_seen_at ? `Last in touch ${ago(y.shop_seen_at)}` : '<b class="note-red">Not connected yet</b>')
+        + row('Last upload from the shop PC', ago(y?.last_ingest_at))
+        + '<p class="muted" style="margin:8px 0 0">When the internet drops, staff open the shop PC\'s <b>/start</b> page and carry on there. Offline sales upload here when the internet is back.</p>';
+    } else if (mode === 'standby') {
+      body = !y?.configured ? '<p class="muted">Shop PC for the cloud POS, but no cloud address is set. Add CLOUD_URL and SYNC_TOKEN.</p>'
+        : row('This server', 'Shop PC (takes over when the internet drops)') + row('Cloud POS', esc(y.cloud))
+          + row('Copy', !y.ready ? esc(y.snapshot || 'Downloading…') : y.current ? 'Up to date' : `Last download ${ago(y.last_pull_at)}`)
+          + row('Internet', y.online === false ? '<b class="note-red">Not reachable. Staff can work here.</b>' : y.online ? 'Connected' : 'Checking…')
+          + row('Waiting to upload', `${y.pending} change${y.pending === 1 ? '' : 's'}${y.oldest_pending ? ` (oldest ${ago(y.oldest_pending)})` : ''}`)
+          + (y.last_error && y.online ? row('Problem', `<span class="note-red">${esc(y.last_error)}</span>`) : '');
     } else {
       body = `<p class="muted">Single server mode. To keep taking orders when the internet is down, run the POS on a PC in the shop and turn this server into a read-only cloud copy. See <b>SHOP-SERVER.md</b> in the project.</p>`;
     }
@@ -899,7 +969,7 @@
     return `<section class="hist">
       <div class="scroll">
         <div class="page-head" style="border-bottom:0"><div><div class="eyebrow">Cash drawer</div><h1 class="title">Shift</h1>
-          <div class="muted">${cur ? `Shift #${cur.shift.id} open since ${clock(cur.shift.opened_at)} · opened by ${esc(cur.shift.opened_by_name || '')}` : 'No shift is open. Open one before taking payments.'}</div></div>
+          <div class="muted">${cur ? `Shift ${shiftNo(cur.shift.id)} open since ${clock(cur.shift.opened_at)} · opened by ${esc(cur.shift.opened_by_name || '')}` : 'No shift is open. Open one before taking payments.'}</div></div>
           ${cur ? `<div style="display:flex;gap:8px;flex-wrap:wrap">
               <button type="button" class="btn" data-act="cash-move" data-kind="in">Cash in</button>
               <button type="button" class="btn" data-act="cash-move" data-kind="out">Cash out</button>
@@ -919,7 +989,7 @@
               || '<tr><td colspan="8" class="muted">No closed shifts yet.</td></tr>'}</tbody></table>
         </div>
       </div>
-      <aside class="hdetail scroll">${d ? `<div class="hd"><div class="eyebrow">Z report · shift #${d.shift.id}</div><h2>${money(d.sales.gross_cents - d.refunds.total_cents)}</h2>
+      <aside class="hdetail scroll">${d ? `<div class="hd"><div class="eyebrow">Z report · shift ${shiftNo(d.shift.id)}</div><h2>${money(d.sales.gross_cents - d.refunds.total_cents)}</h2>
           <div class="muted">${esc(d.shift.opened_by_name || '')} → ${esc(d.shift.closed_by_name || '')}${d.shift.note ? ` · ${esc(d.shift.note)}` : ''}</div>
           <button type="button" class="btn" style="margin-top:12px" data-act="shift-print" data-id="${d.shift.id}">Reprint Z report</button></div>
           <div class="sec compact">${shiftCard(d)}</div>`
@@ -1697,7 +1767,7 @@
     const caret = active === 'search' ? document.activeElement.selectionStart : null;
     const scrolls = [...root.querySelectorAll('.scroll, .ticket-lines, .kcol-b')].map((e) => e.scrollTop);
     const mirrorBar = S.cfg.mode === 'mirror' ? `<div class="mirror-bar"><b>Cloud copy, read-only.</b> Orders, payments and changes are made on the POS in the shop and appear here automatically${S.sync?.last_ingest_at ? ` (last update ${ago(S.sync.last_ingest_at)})` : ''}.</div>` : '';
-    root.innerHTML = `<div class="app">${header()}${mirrorBar}<main>${view}</main></div>`;
+    root.innerHTML = `<div class="app">${header()}${mirrorBar}${standbyBar()}<main>${view}</main></div>`;
     [...root.querySelectorAll('.scroll, .ticket-lines, .kcol-b')].forEach((e, i) => { if (scrolls[i]) e.scrollTop = scrolls[i]; });
     if (active === 'search') { const s = $('#search'); s.focus(); if (caret !== null) s.setSelectionRange(caret, caret); }
     if ($('#rec-total')) updateRecipeTotal();
@@ -1878,7 +1948,7 @@
       render();
     },
     'integ-test': async () => { await api('/admin/integrations/test', { body: {} }); toast('Test event queued'); await integRefreshSoon(); },
-    'integ-resend': async () => { const r = await api('/admin/integrations/resend-last-shift', { body: {} }); toast(`Z-report for shift #${r.shift_id} queued`); await integRefreshSoon(); },
+    'integ-resend': async () => { const r = await api('/admin/integrations/resend-last-shift', { body: {} }); toast(`Z-report for shift ${shiftNo(r.shift_id)} queued`); await integRefreshSoon(); },
     'integ-retry': async (d) => { await api(`/admin/integrations/events/${d.id}/retry`, { body: {} }); await integRefreshSoon(); },
     'integ-retry-all': async () => { const r = await api('/admin/integrations/retry-all', { body: {} }); toast(`Retrying ${r.retried} event${r.retried === 1 ? '' : 's'}`); await integRefreshSoon(); },
     'integ-copy': async () => { try { await navigator.clipboard.writeText(S.admin.integ.secret); toast('Secret copied'); } catch { $('#integ-secret').select(); toast('Press Ctrl+C to copy'); } },
@@ -1970,7 +2040,7 @@
     },
     'shift-close': () => {
       const cur = S.shift;
-      formModal({ eyebrow: `Close shift #${cur.shift.id}`, title: `Expected in drawer: ${money(cur.expected_cents)}`, roles: ['Manager', 'Cashier'], submit: 'Close shift & print Z report', wide: true,
+      formModal({ eyebrow: `Close shift ${shiftNo(cur.shift.id)}`, title: `Expected in drawer: ${money(cur.expected_cents)}`, roles: ['Manager', 'Cashier'], submit: 'Close shift & print Z report', wide: true,
         body: `<label>Count the drawer <small class="muted">(optional helper: notes and coins)</small></label>
           <div class="denoms">${DENOMS.map((n) => `<label class="denom"><span>${n}</span><input data-denom="${n}" type="number" min="0" inputmode="numeric" placeholder="0"></label>`).join('')}</div>
           <div class="two" style="margin-top:12px"><div><label>Counted cash</label><input name="counted" id="counted" inputmode="decimal" placeholder="0.00" required></div>
@@ -2264,7 +2334,12 @@
 
   // tick: clock every 15s, full re-render each minute for ages (skip while a modal or input is active)
   setInterval(() => { const c = $('#clock'); if (c && S.cfg) c.textContent = clock(Date.now()); }, 15000);
-  setInterval(() => { if (S.user && S.cfg?.mode !== 'standalone') loadSync().then(() => { const p = $('#sync-pill'); if (p) p.innerHTML = syncPill(); }); }, 10000);
+  const refreshSync = () => loadSync().then(() => {
+    const p = $('#sync-pill'); if (p) p.innerHTML = syncPill();
+    const b = $('#standby-bar'); if (b) b.outerHTML = standbyBar();
+  });
+  setInterval(() => { if (S.user && S.cfg?.mode && !['standalone', 'standby'].includes(S.cfg.mode)) refreshSync(); }, 10000);
+  setInterval(() => { if (S.user && S.cfg?.mode === 'standby') refreshSync(); }, 3000);
   setInterval(() => { if (S.user && !S.modal && !['admin', 'reports', 'shift', 'stock'].includes(S.tab) && document.activeElement?.tagName !== 'INPUT') render(); }, 60000);
 
   // ---------- boot ----------

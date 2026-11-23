@@ -45,10 +45,12 @@ app.set('trust proxy', 1);
 //   standalone: one server, used directly (default)
 //   local:      the shop server — the master copy; works with no internet and syncs to the cloud when it can
 //   mirror:     the cloud copy on Railway — read-only, kept up to date by the shop server
-const MODE = ['local', 'mirror'].includes(process.env.POS_MODE) ? process.env.POS_MODE : 'standalone';
+//   cloud:      the main POS on Railway; a shop PC in standby keeps a copy for when the internet drops
+//   standby:    the shop PC for 'cloud' — downloads everything from the cloud, takes over during an outage, uploads after
+const MODE = ['local', 'mirror', 'cloud', 'standby'].includes(process.env.POS_MODE) ? process.env.POS_MODE : 'standalone';
 const CLOUD_URL = String(process.env.CLOUD_URL || '').replace(/\/+$/, '');
 const SYNC_TOKEN = String(process.env.SYNC_TOKEN || '');
-const PRINT_DIRECT = process.env.PRINT_DIRECT ? process.env.PRINT_DIRECT === 'true' : MODE === 'local';
+const PRINT_DIRECT = process.env.PRINT_DIRECT ? process.env.PRINT_DIRECT === 'true' : ['local', 'standby'].includes(MODE);
 
 const jsonBody = express.json({ limit: '200kb' });
 // the logo upload and the sync endpoint parse their own larger bodies
@@ -159,6 +161,8 @@ async function approval(req, roles = ['Manager']) {
 }
 const CARD_BRANDS = ['Visa', 'Mastercard', 'Amex', 'UnionPay', 'JCB', 'Other'];
 const reason = (v) => { const r = String(v || '').trim().slice(0, 200); if (r.length < 3) bad('Give a reason'); return r; };
+// shifts opened on the shop PC during an outage have ids from 1,000,000,001
+const shiftNo = (id) => (id > 1000000000 ? `offline #${id - 1000000000}` : `#${id}`);
 const otitle = (o) => (o.type === 'dinein' ? `Table ${o.table_code}` : `${({ takeaway: 'Takeaway', delivery: 'Delivery', counter: 'Counter' })[o.type]} #${o.order_no}`);
 async function openShift(c) {
   const { rows: [sh] } = await c.query("SELECT * FROM shifts WHERE status='open'");
@@ -169,15 +173,25 @@ const printing = createPrinting({ pool, tx, listeners, CONFIG, wrap, HttpError }
 const integrations = createIntegrations({ pool, tx, wrap, HttpError, CONFIG, MODE, shiftSummary: (c, id) => shiftSummary(c, id) });
 const inventory = createInventory({ pool, tx, wrap, HttpError, audit, notify });
 app.use('/bridge', printing.bridge);
-const sync = require('./sync')({ pool, tx, wrap, HttpError, notify, MODE, CLOUD_URL, SYNC_TOKEN });
+const sync = require('./sync')({ pool, tx, wrap, HttpError, notify, MODE, CLOUD_URL, SYNC_TOKEN,
+  // a shift closed on the shop PC during an outage: the cloud sends its Z-report email once it arrives
+  onRemoteShiftClosed: async (c, id) => { await integrations.shiftClosed(c, await shiftSummary(c, id)); setTimeout(() => integrations.kick(), 500); } });
 app.use('/sync', sync.ingest);
+
+// Shop standby: the /start page (public/start.html) asks here whether to send staff to the cloud or keep them on this PC.
+app.get('/start/status', wrap(async (req, res) => {
+  if (MODE !== 'standby') return res.json({ mode: MODE });
+  const y = await sync.status();
+  res.json({ mode: MODE, cloud: CLOUD_URL || null, configured: y.configured, ready: y.ready, online: y.online, current: y.current,
+    pending: y.pending, downloading: y.snapshot, problem: y.last_error && y.online ? y.last_error : null, last_pull_at: y.last_pull_at });
+}));
 
 // ---------- auth ----------
 app.get('/api/config', wrap(async (req, res) => {
   const { rows } = await pool.query("SELECT key, extract(epoch FROM updated_at)::bigint AS v FROM app_images WHERE key IN ('login_bg','logo')");
   const ver = Object.fromEntries(rows.map((r) => [r.key, r.v]));
   const { logoRaster, ...pub } = CONFIG;
-  res.json({ ...pub, mode: MODE, printDirect: PRINT_DIRECT, billText: billtext.TEXT,
+  res.json({ ...pub, mode: MODE, printDirect: PRINT_DIRECT, billText: billtext.TEXT, cloudUrl: MODE === 'standby' ? CLOUD_URL : undefined,
     loginBg: ver.login_bg ? `/login-bg?v=${ver.login_bg}` : '/img/login-bg.jpg', logo: ver.logo ? `/logo?v=${ver.logo}` : null });
 }));
 
@@ -734,8 +748,10 @@ async function shiftSummary(c, shiftId) {
     `SELECT sh.*, a.name AS opened_by_name, b.name AS closed_by_name FROM shifts sh
      LEFT JOIN staff a ON a.id=sh.opened_by LEFT JOIN staff b ON b.id=sh.closed_by WHERE sh.id=$1`, [shiftId]);
   if (!shift) throw new HttpError(404, 'Shift not found');
-  const q = async (sql) => (await c.query(sql, [shiftId])).rows;
-  const [[sales], pays, refs, cardBrands, cash, [voids], [voidOrders], open, movements, refundList] = await Promise.all([
+  // one query at a time: c may be a transaction client, which can't run queries in parallel
+  const q = (sql) => async () => (await c.query(sql, [shiftId])).rows;
+  const inTurn = async (fns) => { const out = []; for (const f of fns) out.push(await f()); return out; };
+  const [[sales], pays, refs, cardBrands, cash, [voids], [voidOrders], open, movements, refundList] = await inTurn([
     q(`SELECT count(*)::int AS orders, coalesce(sum(total_cents),0)::int AS gross_cents, coalesce(sum(discount_cents),0)::int AS discount_cents,
               coalesce(sum(service_cents),0)::int AS service_cents, coalesce(sum(tax_cents),0)::int AS tax_cents, coalesce(sum(tip_cents),0)::int AS tip_cents,
               coalesce(sum(guests) FILTER (WHERE type='dinein'),0)::int AS covers
@@ -747,7 +763,7 @@ async function shiftSummary(c, shiftId) {
     q(`SELECT kind, coalesce(sum(amount_cents),0)::int AS v FROM cash_movements WHERE shift_id=$1 GROUP BY 1`),
     q(`SELECT count(*)::int AS count, coalesce(sum(amount_cents),0)::int AS amount_cents FROM item_voids WHERE shift_id=$1`),
     q(`SELECT count(*)::int AS n FROM orders WHERE shift_id=$1 AND status='void'`),
-    shift.status === 'open' ? c.query("SELECT count(*)::int AS n FROM orders WHERE status='open'").then((r) => r.rows) : Promise.resolve([{ n: 0 }]),
+    async () => (shift.status === 'open' ? (await c.query("SELECT count(*)::int AS n FROM orders WHERE status='open'")).rows : [{ n: 0 }]),
     q(`SELECT m.*, s.name AS staff_name FROM cash_movements m LEFT JOIN staff s ON s.id=m.staff_id WHERE m.shift_id=$1 ORDER BY m.id`),
     q(`SELECT r.*, o.order_no, s.name AS staff_name FROM refunds r JOIN orders o ON o.id=r.order_id LEFT JOIN staff s ON s.id=r.staff_id WHERE r.shift_id=$1 ORDER BY r.id`),
   ]);
@@ -775,7 +791,7 @@ app.post('/api/shift/open', wrap(async (req, res) => {
   const id = await tx(async (c) => {
     if (await openShift(c)) bad('A shift is already open');
     const { rows: [sh] } = await c.query('INSERT INTO shifts(opened_by, float_cents) VALUES ($1,$2) RETURNING id', [req.user.id, float]);
-    await audit(c, { action: 'shift.open', staffId: req.user.id, summary: `Shift #${sh.id} opened with float ${(float / 100).toFixed(2)}` });
+    await audit(c, { action: 'shift.open', staffId: req.user.id, summary: `Shift ${shiftNo(sh.id)} opened with float ${(float / 100).toFixed(2)}` });
     return sh.id;
   });
   notify('shift');
@@ -812,10 +828,10 @@ app.post('/api/shift/close', wrap(async (req, res) => {
       [sh.id, approvedBy, counted, before.expected_cents, note]);
     const v = counted - before.expected_cents;
     await audit(c, { action: 'shift.close', staffId: req.user.id, approvedBy,
-      summary: `Shift #${sh.id} closed · expected ${(before.expected_cents / 100).toFixed(2)}, counted ${(counted / 100).toFixed(2)} (${v === 0 ? 'balanced' : v > 0 ? 'over ' + (v / 100).toFixed(2) : 'short ' + (-v / 100).toFixed(2)})` });
+      summary: `Shift ${shiftNo(sh.id)} closed · expected ${(before.expected_cents / 100).toFixed(2)}, counted ${(counted / 100).toFixed(2)} (${v === 0 ? 'balanced' : v > 0 ? 'over ' + (v / 100).toFixed(2) : 'short ' + (-v / 100).toFixed(2)})` });
     const after = await shiftSummary(c, sh.id);
     const pid = await printing.printerFor(c, 'bill');
-    const job = await printing.enqueue(c, pid, 'zreport', `Z report · shift #${sh.id}`, printing.zReportDoc(after));
+    const job = await printing.enqueue(c, pid, 'zreport', `Z report · shift ${shiftNo(sh.id)}`, printing.zReportDoc(after));
     await integrations.shiftClosed(c, after); // n8n: shift.closed (+ cash.variance when over the limit)
     return { id: sh.id, printed: !!job };
   });
@@ -830,7 +846,7 @@ app.get('/api/shifts', wrap(async (req, res) => {
        (SELECT coalesce(sum(total_cents),0)::int FROM orders o WHERE o.shift_id=sh.id AND o.status='paid') AS gross_cents,
        (SELECT count(*)::int FROM orders o WHERE o.shift_id=sh.id AND o.status='paid') AS orders
      FROM shifts sh LEFT JOIN staff a ON a.id=sh.opened_by LEFT JOIN staff b ON b.id=sh.closed_by
-     ORDER BY sh.id DESC LIMIT 30`);
+     ORDER BY sh.opened_at DESC, sh.id DESC LIMIT 30`);
   res.json({ shifts: rows });
 }));
 app.get('/api/shifts/:id', wrap(async (req, res) => res.json(await shiftSummary(pool, int(req.params.id)))));
@@ -839,7 +855,7 @@ app.post('/api/shifts/:id/print', wrap(async (req, res) => {
   const printed = await tx(async (c) => {
     const sum = await shiftSummary(c, id);
     const pid = await printing.printerFor(c, 'bill');
-    return !!(await printing.enqueue(c, pid, 'zreport', `${sum.shift.status === 'closed' ? 'Z' : 'X'} report · shift #${id}`, printing.zReportDoc(sum)));
+    return !!(await printing.enqueue(c, pid, 'zreport', `${sum.shift.status === 'closed' ? 'Z' : 'X'} report · shift ${shiftNo(id)}`, printing.zReportDoc(sum)));
   });
   res.json({ printed_to_printer: printed });
 }));
@@ -872,7 +888,7 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 (async () => {
-  await migrate({ seed: MODE !== 'mirror' }); // the cloud copy gets its data from the shop server
+  await migrate({ seed: !['mirror', 'standby'].includes(MODE) }); // these get their data from the other server
   await sync.setup();
   await sync.repairSequences();
   await loadSettings();
@@ -880,6 +896,7 @@ const PORT = process.env.PORT || 3000;
   sync.start();
   if (PRINT_DIRECT) printing.startDirect();
   integrations.start();
-  console.log(`Mode: ${MODE}${MODE === 'local' ? ` · cloud copy: ${CLOUD_URL || 'not set'} · printing: ${PRINT_DIRECT ? 'direct' : 'via bridge'}` : ''}`);
+  console.log(`Mode: ${MODE}${['local', 'standby'].includes(MODE) ? ` · cloud: ${CLOUD_URL || 'not set'} · printing: ${PRINT_DIRECT ? 'direct' : 'via bridge'}` : ''}`);
+  if (MODE === 'standby') console.log(`Staff start page: http://<this PC's IP>:${PORT}/start`);
   app.listen(PORT, () => console.log(`POS listening on :${PORT}`));
 })().catch((e) => { console.error(e); process.exit(1); });

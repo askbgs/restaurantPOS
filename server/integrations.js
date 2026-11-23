@@ -35,7 +35,7 @@ module.exports = function createIntegrations({ pool, tx, wrap, HttpError, CONFIG
 
   // Queue an event inside the caller's transaction. Does nothing on the cloud copy or when n8n isn't set up.
   async function emit(c, event, data, { force = false } = {}) {
-    if (MODE === 'mirror') return null;
+    if (MODE === 'mirror' || MODE === 'standby') return null; // standby: the cloud sends it once the shift is uploaded
     const cfg = await config(c);
     if (!cfg.url || (!force && !cfg.events.includes(event))) return null;
     const payload = {
@@ -119,7 +119,7 @@ module.exports = function createIntegrations({ pool, tx, wrap, HttpError, CONFIG
        GROUP BY i.name ORDER BY 3 DESC, 2 DESC LIMIT 5`, [sh.id]);
     const variance = (sh.counted_cents ?? 0) - sum.expected_cents;
     const shift = {
-      id: sh.id, opened_at: sh.opened_at, closed_at: sh.closed_at,
+      id: sh.id, label: sh.id > 1000000000 ? `offline #${sh.id - 1000000000}` : `#${sh.id}`, opened_at: sh.opened_at, closed_at: sh.closed_at,
       opened_by: sh.opened_by_name, closed_by: sh.closed_by_name, note: sh.note,
     };
     const data = {

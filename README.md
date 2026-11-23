@@ -130,12 +130,17 @@ When a shift closes, the POS sends the Z-report to an n8n workflow, and n8n emai
 - **Offline-safe:** events are saved in the `n8n_events` table in the same transaction as the shift close. If the internet or n8n is down, they wait and retry (20 s, 40 s … up to every 30 min, for about 10 hours). They are always delivered in order. The delivery log in Admin shows each event and its result, and has a **Retry** button.
 - **Signed requests:** every request carries `X-POS-Timestamp` and `X-POS-Signature: sha256=HMAC(secret, "<timestamp>.<body>")`. The workflow rejects bad signatures and anything older than 10 minutes with a 401.
 - **Retries on failure:** if the email can't be sent (SMTP down), n8n returns an error and the POS retries, so no report is lost.
-- **Where events are sent from:** on a shop server + cloud setup, the **shop server** sends the events. The n8n settings and secret stay on the shop server and are not copied to the cloud.
+- **Where events are sent from:** in *shop first* the **shop server** sends the events; in *cloud first* the **cloud** sends them, including for shifts closed on the shop PC during an outage (as soon as they're uploaded). The n8n settings and secret stay on the server that sends and are never copied.
 - **Adding events later:** new events (stock low, voids, e-bills) are new event types on the same webhook. The workflow already answers 200 to events it doesn't email, so the POS doesn't retry them.
 
 The email layout lives in the workflow's **Check & build email** Code node (the same code is in `n8n/build-email.js`). Edit it there to change the wording or add sections.
 
-## Works without internet: shop server + cloud copy
+## Works without internet: two setups
+
+- **Shop first** (`local` + `mirror`): the shop PC is the main POS, Railway is a read-only copy. See below and SHOP-SERVER.md.
+- **Cloud first** (`cloud` + `standby`): staff work on Railway; the shop PC takes over during an outage and uploads afterwards. See CLOUD-FIRST.md.
+
+### Shop first: shop server + cloud copy
 
 Run the POS on a PC in the restaurant (`POS_MODE=local`). Ordering, kitchen tickets, printing and
 payments then keep working when the internet is down, and every change syncs to Railway
@@ -146,8 +151,10 @@ payments then keep working when the internet is down, and every change syncs to 
 | `standalone` (default) | anywhere | One server used directly. This is how it worked before. |
 | `local` | shop PC | The master copy. Works offline, prints directly to network printers, queues changes and uploads them to `CLOUD_URL`. |
 | `mirror` | Railway | Read-only cloud copy for Reports, History and Stock from anywhere. Receives changes at `/sync/ingest` (needs `SYNC_TOKEN`). |
+| `cloud` | Railway | The main POS. Keeps a change log for a shop PC in standby and takes its offline work back. Needs `SYNC_TOKEN`. |
+| `standby` | shop PC | Backup for `cloud`: keeps a live copy, takes over when the internet drops, uploads after. Staff open `http://<shop PC>:3000/start`. **Full setup: [CLOUD-FIRST.md](CLOUD-FIRST.md).** |
 
-Extra variables: `CLOUD_URL` (local), `SYNC_TOKEN` (both, same value), `PRINT_DIRECT` (default on in local mode).
+Extra variables: `CLOUD_URL` (local, standby), `SYNC_TOKEN` (both servers, same value), `PRINT_DIRECT` (default on in local and standby mode).
 Shop PC files: `docker-compose.yml` (Postgres + POS + nightly backup), `Dockerfile`, `.env.shop.example`,
 `start-shop-server.bat` (no-Docker option). The Archivo font is now served by the app itself, so
 nothing on screen needs the internet.
@@ -195,7 +202,8 @@ server/printing.js print queue, receipt layouts, bridge API
 server/billtext.js bill wording in English, Tamil and Sinhala
 server/raster.js   draws Tamil/Sinhala bills as an image for thermal printers (fonts in server/fonts/)
 server/reports.js  sales + food-cost reports
-server/sync.js     offline-first sync: change queue, upload worker, cloud copy ingest
+server/sync.js     sync between servers: change log, upload/download workers, shop-first and cloud-first modes
+public/start.html  the shop PC's /start page: opens the cloud POS, or the shop PC when the internet is down
 server/integrations.js  n8n events: outbox, signed webhook delivery, Admin → Integrations API
 n8n/build-email.js the email builder used in the n8n workflow (public/n8n/*.json is the importable workflow)
 server/inventory.js  ingredients, recipes, stock ledger, suppliers, purchases

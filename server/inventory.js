@@ -115,7 +115,7 @@ module.exports = function createInventory({ pool, tx, wrap, HttpError, audit, no
     const { rows } = await pool.query(
       `SELECT m.*, s.name AS staff_name, o.order_no, p.invoice_no FROM stock_moves m LEFT JOIN staff s ON s.id=m.staff_id
        LEFT JOIN orders o ON o.id=m.order_id LEFT JOIN purchases p ON p.id=m.purchase_id
-       WHERE m.ingredient_id=$1 ORDER BY m.id DESC LIMIT 60`, [int(req.params.id)]);
+       WHERE m.ingredient_id=$1 ORDER BY m.created_at DESC, m.id DESC LIMIT 60`, [int(req.params.id)]);
     res.json({ moves: rows });
   }));
   // Waste (always reduces) or a manual correction (+/-)

@@ -68,10 +68,10 @@ module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG }) {
          WHERE ${PAID} AND o.type='dinein' GROUP BY t.id, a.name ORDER BY 3 DESC, 5 DESC`),
       q(`SELECT v.created_at, v.name, v.qty, v.amount_cents, v.reason, o.order_no, s.name AS staff_name, ap.name AS approved_name
          FROM item_voids v JOIN orders o ON o.id=v.order_id LEFT JOIN staff s ON s.id=v.staff_id LEFT JOIN staff ap ON ap.id=v.approved_by
-         WHERE ${inRange('v.created_at')} ORDER BY v.id DESC LIMIT 200`),
+         WHERE ${inRange('v.created_at')} ORDER BY v.created_at DESC, v.id DESC LIMIT 200`),
       q(`SELECT r.created_at, r.amount_cents, r.method, r.reason, o.order_no, s.name AS staff_name, ap.name AS approved_name
          FROM refunds r JOIN orders o ON o.id=r.order_id LEFT JOIN staff s ON s.id=r.staff_id LEFT JOIN staff ap ON ap.id=r.approved_by
-         WHERE ${inRange('r.created_at')} ORDER BY r.id DESC LIMIT 200`),
+         WHERE ${inRange('r.created_at')} ORDER BY r.created_at DESC, r.id DESC LIMIT 200`),
       q(`SELECT discount_pct AS pct, count(*)::int AS orders, coalesce(sum(discount_cents),0)::bigint AS cents
          FROM orders o WHERE ${PAID} AND discount_pct > 0 GROUP BY 1 ORDER BY 1`),
       // stock: cost of what was sold (valued when sold), waste, count differences, purchases
@@ -91,7 +91,7 @@ module.exports = function reportsRouter({ pool, wrap, HttpError, CONFIG }) {
          WHERE ${PAID} GROUP BY i.name HAVING sum(i.qty - i.void_qty) > 0 ORDER BY 3 DESC`),
       q(`SELECT m.created_at, g.name, g.unit, -m.change AS qty, m.value_cents, m.note, s.name AS staff_name
          FROM stock_moves m JOIN ingredients g ON g.id=m.ingredient_id LEFT JOIN staff s ON s.id=m.staff_id
-         WHERE m.kind='waste' AND ${inRange('m.created_at')} ORDER BY m.id DESC LIMIT 100`),
+         WHERE m.kind='waste' AND ${inRange('m.created_at')} ORDER BY m.created_at DESC, m.id DESC LIMIT 100`),
       q(`SELECT coalesce(card_brand,'Not recorded') AS brand, count(*)::int AS orders, coalesce(sum(total_cents),0)::bigint AS cents
          FROM orders o WHERE ${PAID} AND payment_method='card' GROUP BY 1 ORDER BY 3 DESC`),
     ]);

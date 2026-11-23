@@ -28,7 +28,7 @@ services:
       - "3000:3000"
     environment:
       DATABASE_URL: postgres://pos:${DB_PASSWORD:-change-me}@db:5432/pos
-      POS_MODE: local
+      POS_MODE: ${POS_MODE:-local}   # local = shop PC is the main POS; standby = cloud is the main POS (CLOUD-FIRST.md)
       CLOUD_URL: ${CLOUD_URL:-}
       SYNC_TOKEN: ${SYNC_TOKEN:-}
       PRINT_DIRECT: "true"

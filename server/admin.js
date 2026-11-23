@@ -66,7 +66,7 @@ module.exports = function adminRouter({ pool, tx, hashPin, checkPin, notify, wra
     const { rows } = await pool.query(
       `SELECT a.*, s.name AS staff_name, ap.name AS approved_name, o.order_no
        FROM audit_log a LEFT JOIN staff s ON s.id=a.staff_id LEFT JOIN staff ap ON ap.id=a.approved_by LEFT JOIN orders o ON o.id=a.order_id
-       WHERE ($1 = '' OR a.action LIKE $1 || '%') ORDER BY a.id DESC LIMIT 300`, [action]);
+       WHERE ($1 = '' OR a.action LIKE $1 || '%') ORDER BY a.created_at DESC, a.id DESC LIMIT 300`, [action]);
     res.json({ entries: rows });
   }));
 

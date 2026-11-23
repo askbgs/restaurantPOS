@@ -1,5 +1,9 @@
 # Shop server: keep selling when the internet is down
 
+> **Two setups.** This guide is for *shop first*: the shop PC is the main POS and Railway is a read-only copy.
+> If you'd rather work on the **cloud POS** and use the shop PC only when the internet drops, follow
+> **[CLOUD-FIRST.md](CLOUD-FIRST.md)** instead.
+
 The POS runs on a small PC **inside the restaurant**. Tablets, the kitchen screen and the receipt and
 kitchen printers all talk to that PC over the shop Wi-Fi/LAN, so **taking orders, sending KOTs,
 printing and charging never need the internet**.
