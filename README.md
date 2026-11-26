@@ -115,6 +115,10 @@ Managers see the plan in **Admin → Plan & licence**, and locked features show 
 
 Make your signing key once (`npm run license:keygen`), then issue keys with `npm run license:issue`. **Full guide: [LICENSING.md](LICENSING.md).**
 
+## Live demo
+
+Set `DEMO_MODE=true` on a separate server with its own database. It runs a public demo with one-tap demo sign-in, a lived-in restaurant whose dates always end today, a nightly reset, and staff, licence, printers, emails and uploads locked. **Setup: [DEMO.md](DEMO.md).**
+
 ## Bills in Tamil and Sinhala
 
 - **Printing a bill:** on the Bill screen, staff pick **English / தமிழ் / සිංහල** next to Print bill. Reprints in History have the same choice.
@@ -202,6 +206,7 @@ export $(grep -v '^#' .env | xargs) && npm start
 | `LATE_MINUTES` | `12` | Cooking time before a ticket shows LATE |
 | `TZ_DISPLAY` | `Asia/Colombo` | Used for times and the "today" filter |
 | `LICENSE_KEY` | (none) | The restaurant's licence key. Optional: it can also be pasted in Admin → Plan & licence |
+| `DEMO_MODE` | `false` | `true` turns this server into the public live demo (see DEMO.md) |
 | `VENDOR_WHATSAPP` | `94786036092` | Where *Upgrade on WhatsApp* buttons send messages |
 
 How totals are calculated: subtotal − discount = base. Service, tax and tip are each a percentage of the base.
@@ -216,6 +221,8 @@ server/billtext.js bill wording in English, Tamil and Sinhala
 server/raster.js   draws Tamil/Sinhala bills as an image for thermal printers (fonts in server/fonts/)
 server/reports.js  sales + food-cost reports
 server/license.js  packages (Basic / Pro / Business), licence key check, trial and expiry
+server/demo.js     live demo mode: loads server/demo/demo-data.json.gz, moves dates to today, nightly reset, locks
+tools/demo/export.js  saves a database as the demo snapshot (npm run demo:export)
 tools/license/     keygen.js (your signing key, once) and issue.js (a key per client)
 server/sync.js     sync between servers: change log, upload/download workers, shop-first and cloud-first modes
 public/start.html  the shop PC's /start page: opens the cloud POS, or the shop PC when the internet is down

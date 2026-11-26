@@ -460,3 +460,4 @@ module.exports = function createSync({ pool, tx, wrap, HttpError, notify, MODE, 
 
   return { setup, repairSequences, start, status, ingest: router, TABLES, LOCAL_ID_BASE, OFFLINE_NO_BASE };
 };
+module.exports.TABLES = TABLES;

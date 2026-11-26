@@ -55,7 +55,7 @@ function verifyKey(key) {
 
 const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 86400000); // a − b in whole days
 
-module.exports = function createLicense({ pool, CONFIG }) {
+module.exports = function createLicense({ pool, CONFIG, DEMO = false }) {
   let cache = { stamp: null, value: null };
 
   async function setting(key) { const { rows: [r] } = await pool.query('SELECT value FROM settings WHERE key=$1', [key]); return r ? r.value : null; }
@@ -76,6 +76,10 @@ module.exports = function createLicense({ pool, CONFIG }) {
 
   // The licence as it applies today: plan, limits, features and state (active / warning / grace / expired).
   async function current() {
+    if (DEMO) { // the public demo shows everything and never expires
+      return { plan: 'business', planName: 'Business', client: 'Live demo', id: null, expires: '2099-12-31', daysLeft: 9999, state: 'active', problem: null, graceEnds: '2099-12-31',
+        limits: { devices: null, staff: null }, features: Object.fromEntries(Object.keys(FEATURES).map((f) => [f, true])) };
+    }
     const key = await setting('license_key');
     const started = await setting('trial_started');
     const stamp = `${today()}|${key}|${started}`;

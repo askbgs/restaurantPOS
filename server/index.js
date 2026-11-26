@@ -21,6 +21,8 @@ const CONFIG = {
   // business details printed on bills (set in Admin → Settings)
   address: '', phone: '', email: '', website: '', regNo: '', billFooter: 'Thank you! Come again.',
   // bill language (en | ta | si) and the restaurant's own wording in Tamil and Sinhala (optional)
+  // menu category the order screen opens on ('' = 'Sri Lankan' if there is one, else the first)
+  defaultCategory: '',
   billLang: 'en', restaurantTa: '', addressTa: '', billFooterTa: '', restaurantSi: '', addressSi: '', billFooterSi: '',
   logoRaster: null, // 1-bit logo for thermal printers: { w, h, data (base64, packed rows) }
 };
@@ -40,7 +42,8 @@ async function loadSettings() {
 listeners.add((kind) => { if (kind === 'settings') loadSettings().catch((e) => console.error('settings reload', e.message)); });
 
 // Packages: Basic / Pro / Business, unlocked by a signed licence key (server/license.js)
-const license = require('./license')({ pool, CONFIG });
+const DEMO = process.env.DEMO_MODE === 'true'; // public live demo (server/demo.js)
+const license = require('./license')({ pool, CONFIG, DEMO });
 const VENDOR_WHATSAPP = (process.env.VENDOR_WHATSAPP || '94786036092').replace(/\D/g, '');
 // Route guard: the feature must be in this restaurant's plan
 const need = (feature) => (req, res, next) => license.has(feature)
@@ -201,8 +204,9 @@ app.get('/api/config', wrap(async (req, res) => {
   const ver = Object.fromEntries(rows.map((r) => [r.key, r.v]));
   const { logoRaster, ...pub } = CONFIG;
   const lic = await license.current();
-  res.json({ ...pub, license: { ...lic, id: undefined }, vendorWhatsapp: VENDOR_WHATSAPP, mode: MODE, printDirect: PRINT_DIRECT, billText: billtext.TEXT, cloudUrl: MODE === 'standby' ? CLOUD_URL : undefined,
-    loginBg: ver.login_bg ? `/login-bg?v=${ver.login_bg}` : '/img/login-bg.jpg', logo: ver.logo ? `/logo?v=${ver.logo}` : null });
+  res.json({ ...pub, license: { ...lic, id: undefined }, vendorWhatsapp: VENDOR_WHATSAPP,
+    demo: demo ? { ...demo.info, trialUrl: process.env.DEMO_TRIAL_URL || 'https://virunthu.shop/#trial' } : undefined, mode: MODE, printDirect: PRINT_DIRECT, billText: billtext.TEXT, cloudUrl: MODE === 'standby' ? CLOUD_URL : undefined,
+    loginBg: DEMO ? '/img/demo-login-bg.jpg' : ver.login_bg ? `/login-bg?v=${ver.login_bg}` : '/img/login-bg.jpg', logo: ver.logo ? `/logo?v=${ver.logo}` : null });
 }));
 
 // Restaurant logo (public: shown on the login screen and printed bills)
@@ -300,6 +304,12 @@ app.use('/api', auth);
 
 app.get('/api/me', (req, res) => res.json(req.user));
 app.get('/api/sync/status', wrap(async (req, res) => res.json(await sync.status())));
+// Live demo: blocked actions, and a reset button for visitors
+const demo = DEMO ? require('./demo')({ pool, tx, notify, loadSettings, repairSequences: () => sync.repairSequences(), CONFIG, HttpError }) : null;
+if (demo) {
+  app.use('/api', demo.guard);
+  app.post('/api/demo/reset', wrap(async (req, res) => { await demo.resetByVisitor(); res.json({ ok: true }); }));
+}
 app.use('/api/admin/audit', need('audit'));
 app.use('/api/admin', adminRouter({ pool, tx, hashPin, checkPin, notify, wrap, HttpError, CONFIG, ENV_CONFIG, loadSettings, audit, license }));
 app.use('/api/admin/printing', printing.admin);
@@ -983,6 +993,7 @@ const PORT = process.env.PORT || 3000;
   await sync.setup();
   if (!['mirror', 'standby'].includes(MODE)) await license.ensureTrialStart(); // these take it from the other server
   await license.adoptEnvKey();
+  if (demo) { if (MODE !== 'standalone') throw new Error('DEMO_MODE needs POS_MODE=standalone'); await demo.start(); }
   await sync.repairSequences();
   await loadSettings();
   await startListener();

@@ -679,3 +679,13 @@ svg.bars { width: 100%; height: 180px; display: block; overflow: visible; }
 .plan-table .cur { background: #fbf6e3; font-weight: 700; }
 #license-form textarea { width: 100%; max-width: 720px; font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; padding: 10px; border: 2px solid var(--ink); }
 .btn.sm { padding: 6px 10px; font-size: 13px; }
+
+/* live demo */
+.demo-bar { background: #c9280f; }
+.demo-bar .bar-btn.ghost { background: transparent; color: #fff; border: 2px solid #fff; padding: 5px 12px; }
+.demo-pins { margin-top: 14px; display: grid; gap: 8px; }
+.demo-pins .eyebrow { text-align: center; }
+.demo-pins button { text-align: left; border: 2px solid var(--ink); background: #fff; padding: 9px 12px; font: inherit; cursor: pointer; }
+.demo-pins button:hover { background: #f0efed; }
+.demo-pins button b { display: block; font-size: 15px; }
+.demo-pins button span { font-size: 12.5px; color: var(--muted); }
